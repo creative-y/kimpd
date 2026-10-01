@@ -1,0 +1,1048 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>김프 모니터 · Bithumb × 해외거래소</title>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#161b22; --panel2:#1c2330; --line:#2a3240;
+    --tx:#e6edf3; --tx2:#8b949e; --tx3:#6e7681;
+    --up:#f6465d; --dn:#2ebd85; --acc:#58a6ff; --warn:#e3b341;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--tx);
+    font-family:-apple-system,BlinkMacSystemFont,"Pretendard","Apple SD Gothic Neo","Malgun Gothic",Segoe UI,sans-serif;
+    font-size:14px;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1180px;margin:0 auto;padding:18px 18px 40px}
+
+  header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+  h1{font-size:15px;font-weight:600;margin:0;letter-spacing:-.2px}
+  h1 span{color:var(--tx3);font-weight:400}
+  .sp{flex:1}
+  #status{font-size:12px;color:var(--tx2);font-family:var(--mono)}
+
+  .ctl{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+  input[type=text],select{background:var(--panel2);border:1px solid var(--line);color:var(--tx);
+    padding:8px 11px;border-radius:7px;font-size:13.5px;outline:none;font-family:var(--mono)}
+  input[type=text]{text-transform:uppercase;width:112px;letter-spacing:.5px}
+  input[type=text].free{text-transform:none;letter-spacing:0;font-size:12px}
+  input[type=text]:focus,select:focus{border-color:var(--acc)}
+  select{cursor:pointer}
+  button{background:var(--panel2);border:1px solid var(--line);color:var(--tx);
+    padding:8px 13px;border-radius:7px;font-size:13px;cursor:pointer;transition:.12s}
+  button:hover{border-color:#3d4757;background:#222b39}
+  button.primary{background:var(--acc);border-color:var(--acc);color:#06121f;font-weight:600}
+  button.primary:hover{background:#7cb8ff}
+  .seg{display:flex;background:var(--panel2);border:1px solid var(--line);border-radius:7px;overflow:hidden}
+  .seg button{border:0;border-radius:0;padding:8px 12px;background:transparent;color:var(--tx2);font-size:12.5px;font-family:var(--mono)}
+  .seg button.on{background:#2b3646;color:var(--tx)}
+  label.lb{color:var(--tx3);font-size:12px}
+
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1px;background:var(--line);
+    border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-bottom:12px}
+  .st{background:var(--panel);padding:11px 13px}
+  .st .k{color:var(--tx3);font-size:11px;letter-spacing:.3px;margin-bottom:5px}
+  .st .v{font-family:var(--mono);font-size:17px;font-weight:600;letter-spacing:-.3px}
+  .st .v.sm{font-size:14px;font-weight:500}
+  .up{color:var(--up)}.dn{color:var(--dn)}.mute{color:var(--tx2)}.warn{color:var(--warn)}
+
+  .chartbox{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px}
+  canvas{display:block;width:100%;height:430px;cursor:crosshair}
+  #tip{position:absolute;pointer-events:none;background:rgba(13,17,23,.96);border:1px solid var(--line);
+    border-radius:7px;padding:8px 10px;font-family:var(--mono);font-size:11.5px;line-height:1.65;
+    white-space:nowrap;opacity:0;transition:opacity .1s;z-index:5;box-shadow:0 6px 18px rgba(0,0,0,.5)}
+  #tip .t{color:var(--tx3);margin-bottom:3px}
+  #zoomHint{position:absolute;left:14px;top:12px;font-family:var(--mono);font-size:11px;color:var(--tx3);pointer-events:none}
+
+  #msg{margin-top:12px;padding:11px 13px;border-radius:8px;font-size:12.5px;line-height:1.75;display:none}
+  #msg.err{display:block;background:rgba(246,70,93,.08);border:1px solid rgba(246,70,93,.35);color:#ffb3bd}
+  #msg.warn{display:block;background:rgba(227,179,65,.07);border:1px solid rgba(227,179,65,.3);color:#f0d795}
+  #msg code{font-family:var(--mono);font-size:11.5px;color:#fff;background:rgba(255,255,255,.07);padding:1px 5px;border-radius:4px}
+  #msg .ok{color:var(--dn)} #msg .no{color:var(--up)}
+  #msg table{border-collapse:collapse;margin-top:7px;font-family:var(--mono);font-size:11.5px}
+  #msg td{padding:2px 14px 2px 0;color:var(--tx2)}
+
+  .foot{margin-top:14px;color:var(--tx3);font-size:11.5px;line-height:1.7}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--tx3);margin-right:6px;vertical-align:1px}
+  .dot.live{background:var(--dn);animation:p 2s infinite}
+  .dot.bad{background:var(--up)} .dot.warn{background:var(--warn)}
+  @keyframes p{0%{box-shadow:0 0 0 0 rgba(46,189,133,.5)}70%{box-shadow:0 0 0 6px rgba(46,189,133,0)}100%{box-shadow:0 0 0 0 rgba(46,189,133,0)}}
+  details{margin-top:10px}
+  summary{cursor:pointer;color:var(--tx3);font-size:12px;outline:none}
+  .adv{display:flex;gap:8px;align-items:center;margin-top:9px;flex-wrap:wrap}
+  .cmpOnly{display:none}
+  body.cmp .cmpOnly{display:inline-flex}
+  body.cmp #krx, body.cmp #ex{display:none}
+  .arrow{color:var(--tx3);font-family:var(--mono);font-size:13px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <h1>김프 모니터 <span id="subtitle">· 원화 KRW × 해외 USDT</span></h1>
+    <div class="sp"></div>
+    <div id="status"><span class="dot" id="dot"></span><span id="statusTx">대기</span></div>
+  </header>
+
+  <div class="ctl">
+    <input type="text" id="sym" value="UB" placeholder="티커" spellcheck="false">
+    <button class="primary" id="go">조회</button>
+    <div class="seg" id="mode">
+      <button data-v="kimp" class="on">김프</button>
+      <button data-v="cmp">거래소 비교</button>
+    </div>
+    <button id="diag" title="이 브라우저에서 각 거래소 API가 되는지 BTC로 한 번씩 확인합니다">연결 테스트</button>
+    <select id="exA" class="cmpOnly"></select>
+    <span class="arrow cmpOnly">→</span>
+    <select id="exB" class="cmpOnly"></select>
+    <select id="krx">
+      <option value="auto">원화: 자동탐색</option>
+      <option value="bithumb">원화: 빗썸</option>
+      <option value="upbit">원화: 업비트</option>
+      <option value="coinone">원화: 코인원</option>
+    </select>
+    <select id="ex">
+      <option value="auto">해외: 자동탐색</option>
+      <option value="gate">Gate.io</option>
+      <option value="mexc">MEXC</option>
+      <option value="bitget">Bitget</option>
+      <option value="bybit">Bybit</option>
+      <option value="okx">OKX</option>
+      <option value="binance">Binance</option>
+      <option value="kucoin">KuCoin</option>
+      <option value="coinbase">Coinbase</option>
+      <option value="kraken">Kraken</option>
+    </select>
+    <div class="seg" id="span">
+      <button data-v="60">1시간</button>
+      <button data-v="360">6시간</button>
+      <button data-v="1440">1일</button>
+      <button data-v="4320" class="on">3일</button>
+      <button data-v="14400">10일</button>
+    </div>
+    <div class="seg" id="tf">
+      <button data-v="0" class="on">자동</button>
+      <button data-v="1">1m</button>
+      <button data-v="5">5m</button>
+      <button data-v="15">15m</button>
+      <button data-v="60">1h</button>
+    </div>
+    <div class="seg" id="rf">
+      <button data-v="0">수동</button>
+      <button data-v="10" class="on">10초</button>
+      <button data-v="30">30초</button>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="st"><div class="k" id="k_now">현재 프리미엄</div><div class="v" id="s_now">–</div></div>
+    <div class="st"><div class="k">구간 최고</div><div class="v sm" id="s_max">–</div></div>
+    <div class="st"><div class="k">구간 최저</div><div class="v sm" id="s_min">–</div></div>
+    <div class="st"><div class="k">구간 평균</div><div class="v sm" id="s_avg">–</div></div>
+    <div class="st"><div class="k" id="k_krw">빗썸 가격</div><div class="v sm" id="s_krw">–</div></div>
+    <div class="st"><div class="k" id="k_gate">해외 환산</div><div class="v sm" id="s_gate">–</div></div>
+    <div class="st"><div class="k" id="k_rate">USDT/KRW</div><div class="v sm" id="s_rate">–</div></div>
+  </div>
+
+  <div class="chartbox">
+    <canvas id="cv"></canvas>
+    <div id="zoomHint">휠 스크롤로 기간 조절</div>
+    <div id="tip"></div>
+  </div>
+
+  <div id="msg"></div>
+
+  <details id="advBox">
+    <summary>고급 설정 (프록시 · 페어 직접 지정)</summary>
+    <div class="adv">
+      <label class="lb">프록시</label>
+      <select id="proxy">
+        <option value="auto">자동 (직접 → 실패 시 우회)</option>
+        <option value="">사용 안 함 (직접만)</option>
+        <option value="https://api.allorigins.win/raw?url=">allorigins</option>
+        <option value="https://api.codetabs.com/v1/proxy?quest=">codetabs</option>
+        <option value="https://api.cors.lol/?url=">cors.lol</option>
+        <option value="custom">직접 입력…</option>
+      </select>
+      <input type="text" class="free" id="proxyCustom" placeholder="https://…?url=" style="width:220px;display:none">
+      <label class="lb">해외 페어</label>
+      <input type="text" class="free" id="gpair" placeholder="자동 (예: UB_USDT)" style="width:140px">
+    </div>
+  </details>
+
+  <div class="foot">
+    <span id="formula">프리미엄 = (원화거래소 KRW 종가 − 해외 USDT 종가 × USDT/KRW) ÷ (해외 USDT 종가 × USDT/KRW) × 100</span><br>
+    같은 봉끼리 UTC 타임스탬프로 정렬해 계산합니다. 받아온 데이터는 누적 보관하며, 갱신에 실패해도 직전 화면을 유지합니다.
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const cv = $('cv'), ctx = cv.getContext('2d'), tip = $('tip');
+  const MINMS = 60000, MAXSPAN = 14400, MINSPAN = 15;   // 15분 ~ 10일
+
+  const S = {
+    sym:'UB', mode:'kimp', krx:'auto', krxUsed:'', ex:'auto', cmpA:'gate', cmpB:'mexc',
+    tfMode:0, spanMin:4320, rf:10, toFmt:{}, pairOk:{},
+    unit:1, series:[], cacheKey:'', K:new Map(), G:new Map(), R:new Map(),
+    timer:null, debounce:null, hover:null, busy:false, started:false,
+    winner:null, exName:'', route:new Map(), lastOk:0, warn:''
+  };
+
+  /* ---------- utils ---------- */
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const px = n => n.toLocaleString('ko-KR',{maximumFractionDigits:n>=1000?0:n>=100?1:n>=1?2:n>=0.01?4:8});
+  // USDT 호가는 자릿수를 고정해야 두 거래소 값을 눈으로 비교하기 쉽다
+  const pxu = n => { const m = Math.abs(n)>=1000?2:Math.abs(n)>=1?4:6;
+    return n.toLocaleString('ko-KR',{minimumFractionDigits:m,maximumFractionDigits:m}); };
+  const pc = n => (n>=0?'+':'') + n.toFixed(3) + '%';
+  const hhmm = ts=>{const d=new Date(ts);return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')};
+  const mmdd = ts=>{const d=new Date(ts);return (d.getMonth()+1)+'/'+d.getDate()};
+  const cls = n => n>0?'up':n<0?'dn':'mute';
+  const say = (k,h)=>{const m=$('msg');m.className=k||'';m.innerHTML=h||''};
+  // s는 'live' | 'warn' | 'bad' | '' (공백 유무와 무관하게 안전하게 붙인다)
+  const stat = (t,s)=>{ $('statusTx').textContent=t;
+    const d=$('dot'); if(d) d.className = 'dot' + (s ? ' '+String(s).trim() : ''); };
+  const spanTx = m => m>=1440 ? (m/1440).toFixed(m%1440?1:0)+'일' : m>=60 ? (m/60).toFixed(m%60?1:0)+'시간' : Math.round(m)+'분';
+  const stamp = t => t==null ? '–' : new Date(t).toLocaleString('ko-KR',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+  function minKey(m){ let v=null; for(const k of m.keys()) if(v===null||k<v) v=k; return v; }
+  function maxKey(m){ let v=null; for(const k of m.keys()) if(v===null||k>v) v=k; return v; }
+  // 구간 안에서 가장 큰 구멍을 찾는다 (봉 간격이 기대치의 3배를 넘으면 구멍)
+  function findGap(map, from, to, unit){
+    const ks=[]; for(const k of map.keys()) if(k>=from && k<=to) ks.push(k);
+    ks.sort((a,b)=>a-b);
+    const min = unit*MINMS*3; let best=null;
+    for(let i=1;i<ks.length;i++){
+      const len = ks[i]-ks[i-1];
+      if(len>min && (!best || len>best.len)) best={from:ks[i-1], to:ks[i], len};
+    }
+    return best;
+  }
+  const settle = pr => pr.then(v=>({status:'fulfilled',value:v}), e=>({status:'rejected',reason:e}));
+
+  /* ---------- fetch (프록시 폴백) ---------- */
+  const PROXIES = ['https://api.allorigins.win/raw?url=', 'https://api.codetabs.com/v1/proxy?quest=',
+                   'https://api.cors.lol/?url='];
+  const wrap = (p,u) => p ? p + encodeURIComponent(u) : u;
+  function proxyChoice(){
+    const v = $('proxy').value;
+    if(v==='custom') return [$('proxyCustom').value.trim()].filter(Boolean);
+    if(v==='auto') return null;
+    if(v==='') return [''];
+    return [v];
+  }
+  async function J(url){
+    const host = new URL(url).host, fixed = proxyChoice();
+    let chain = fixed ? fixed : ['', ...PROXIES];
+    if(!fixed && S.route.has(host)){ const w=S.route.get(host); chain=[w,...chain.filter(c=>c!==w)]; }
+    let first=null, tried=0;
+    for(const p of chain){
+      try{
+        const r = await fetch(wrap(p,url), {cache:'no-store'});
+        if(!r.ok){ const e=new Error('HTTP '+r.status); e.status=r.status; throw e; }
+        const j = await r.json();
+        if(!fixed) S.route.set(host,p);
+        return j;
+      }catch(e){
+        tried++; if(!first) first=e;
+        // 서버가 정상적으로 거부한 응답(파라미터 오류 등)은 프록시로 재시도해도 같다 → 즉시 중단
+        if(e.status && ![403,429,451].includes(e.status)) break;
+      }
+    }
+    throw new Error((first?first.message:'fetch 실패') + (tried>1?` · 우회 ${tried-1}회도 실패`:''));
+  }
+
+  /* ---------- 빗썸 (페이지네이션) ---------- */
+  const B_UNITS=[1,3,5,10,15,30,60,240];
+  const sleep = ms => new Promise(r=>setTimeout(r,ms));
+  // `to` 파라미터 표기법이 서버마다 다를 수 있어 여러 형식을 시도하고, 통한 형식을 기억한다
+  // 표기가 없는 형식은 서버가 KST로 읽을 수도, UTC로 읽을 수도 있다 → 양쪽 다 후보로 두고
+  // 실제 응답 시각이 요청한 지점과 맞는지 확인해서 고른다(아래 drift 검사)
+  const TO_FMT = [
+    ms => new Date(ms).toISOString().slice(0,19)+'Z',                          // UTC 명시
+    ms => new Date(ms+9*3600000).toISOString().slice(0,19)+'+09:00',           // KST 명시
+    ms => new Date(ms+9*3600000).toISOString().slice(0,19),                    // KST 벽시계
+    ms => new Date(ms+9*3600000).toISOString().slice(0,19).replace('T',' '),   // KST 벽시계(공백)
+    ms => new Date(ms).toISOString().slice(0,19),                              // UTC 벽시계
+    ms => new Date(ms).toISOString().slice(0,19).replace('T',' '),
+  ];
+  // 빗썸 v1 / 업비트는 동일한 스펙(업비트 호환)
+  const KRW_EX = {
+    bithumb:{ name:'빗썸',   kind:'upbit', host:'https://api.bithumb.com', legacy:true },
+    upbit:  { name:'업비트', kind:'upbit', host:'https://api.upbit.com' },
+    coinone:{ name:'코인원', kind:'coinone', max:500 },
+  };
+  const KRX_ORDER = ['bithumb','upbit','coinone'];
+  const krxName = () => S.krxUsed ? KRW_EX[S.krxUsed].name
+                      : (S.krx==='auto' ? '원화거래소' : KRW_EX[S.krx].name);
+  // S.G = 기준(분모), S.K = 대상(분자)
+  const nameBase   = () => S.mode==='cmp' ? EX[S.cmpA].name : (S.exName||'해외');
+  const nameTarget = () => S.mode==='cmp' ? EX[S.cmpB].name : krxName();
+  // Coinbase·Kraken은 USDT 마켓이 없으면 USD 마켓으로 떨어진다 → 그 사실을 표시
+  function usdNote(){
+    const keys = S.mode==='cmp' ? [S.cmpA, S.cmpB] : [S.winner || S.ex];
+    const used = keys.map(k=>S.pairOk[`${k}|${S.sym}`]).filter(Boolean);
+    return used.some(p=>/USD$/.test(p) && !/USDT$/.test(p))
+      ? `  ·  USD 마켓 사용(USDT≈USD로 간주)` : '';
+  }
+
+  async function candlesV1(host, market, unit, need, tag, beforeMs){
+    tag = tag || {};
+    const u = B_UNITS.includes(unit)?unit:1;
+    const maxPage = Math.min(12, Math.ceil(need/200)+1);
+    const base = `${host}/v1/candles/minutes/${u}?market=${market}`;
+    const out=[]; let toMs = beforeMs ? beforeMs-1 : null, guard=0, firstErr=null;
+    while(out.length < need && guard++ < maxPage){
+      if(guard>1) await sleep(60);
+      const n = Math.min(200, need-out.length);
+      // 1페이지는 to 없이, 이후는 형식 후보를 순서대로(직전 성공 형식 우선)
+      const idx = [S.toFmt[host] ?? 0, 0, 1, 2, 3, 4, 5].filter((v,i,a)=>a.indexOf(v)===i);
+      const cands = toMs==null ? [null] : idx.map(i=>({i, s:TO_FMT[i](toMs)}));
+      let rows=null, lastErr=null;
+      for(const c of cands){
+        try{
+          const j = await J(base + `&count=${n}` + (c?`&to=${encodeURIComponent(c.s)}`:''));
+          if(!Array.isArray(j)) throw new Error('무효 응답');
+          if(c && !j.length){ lastErr = new Error('0건'); continue; }   // 형식 문제일 수 있으니 다음 후보
+          if(c){
+            // 서버가 to를 다른 시간대로 읽으면 응답이 몇 시간씩 어긋난다 → 그 형식은 버린다
+            let newest = -Infinity;
+            for(const r of j){ const t = Date.parse(r.candle_date_time_utc+'Z'); if(t>newest) newest=t; }
+            const drift = toMs - newest;
+            if(drift > u*MINMS*3 || drift < -u*MINMS){
+              lastErr = new Error(`to 해석 불일치(${Math.round(drift/60000)}분)`);
+              continue;
+            }
+          }
+          rows = j; if(c) S.toFmt[host] = c.i;
+          break;
+        }catch(e){ lastErr = e; }
+      }
+      if(!rows || !rows.length){
+        if(guard>1) tag.v1note = `${guard}페이지 중단(${lastErr?lastErr.message:'0건'})`;
+        if(!firstErr) firstErr = lastErr;
+        break;
+      }
+      for(const r of rows) out.push([Date.parse(r.candle_date_time_utc+'Z'), +r.trade_price]);
+      toMs = Date.parse(rows[rows.length-1].candle_date_time_utc+'Z');
+      if(rows.length < n){ tag.v1note = `${guard}페이지에서 소진(${rows.length}/${n})`; break; }
+    }
+    if(!out.length) throw (firstErr || new Error('빈 응답'));
+    return out;
+  }
+  // 코인원 v2 차트 — 한 번에 최대 500봉, 페이지네이션 없음
+  async function coinoneCandles(coin, unit, need){
+    const m = {1:'1m',3:'3m',5:'5m',10:'10m',15:'15m',30:'30m',60:'1h'};
+    const size = Math.min(500, Math.max(10, need));
+    const j = await J(`https://api.coinone.co.kr/public/v2/chart/KRW/${coin}?interval=${m[unit]||'1m'}&size=${size}`);
+    if(j.result !== 'success' || !Array.isArray(j.chart) || !j.chart.length)
+      throw new Error(`코인원에 ${coin}/KRW 마켓이 없거나 조회 불가 (code ${j.error_code ?? '-'})`);
+    return j.chart.map(r => [+r.timestamp, +r.close]);
+  }
+  async function bithumbLegacy(coin, unit, need){
+    const m={1:'1m',3:'3m',5:'5m',10:'10m',15:'5m',30:'30m',60:'1h'};
+    const j = await J(`https://api.bithumb.com/public/candlestick/${coin}_KRW/${m[unit]||'1m'}`);
+    if(j.status!=='0000' || !j.data?.length) throw new Error('status '+j.status);
+    return j.data.slice(-Math.max(need||0, 3000)).map(r=>[+r[0], +r[2]]);
+  }
+  // 빗썸은 신·구 API를 모두 긁어 합친다(보관 기간이 다름). 업비트는 v1만 존재
+  async function krwCandlesOn(key, coin, unit, need, tag, beforeMs){
+    tag = tag || {};
+    const ex = KRW_EX[key], out = [];
+    try{
+      const rows = ex.kind === 'coinone'
+        ? await coinoneCandles(coin, unit, need)
+        : await candlesV1(ex.host, 'KRW-'+coin, unit, need, tag, beforeMs);
+      out.push(...rows); tag.v1 = rows.length;
+    }catch(e){ tag.v1err = /HTTP 404/.test(e.message) ? `${ex.name}에 ${coin}/KRW 마켓 없음` : e.message; }
+    if(ex.legacy && out.length < need){                // 부족하면 구 API로 보충
+      try{
+        const rows = await bithumbLegacy(coin, unit, need);
+        out.push(...rows); tag.lg = rows.length;
+      }catch(e){ tag.lgerr = e.message; }
+    }
+    if(!out.length) throw new Error(tag.v1err || tag.lgerr || `${ex.name} 조회 실패`);
+    return out;
+  }
+  // 자동탐색이면 상장돼 있는 원화거래소를 찾아 채택
+  async function krwCandles(coin, unit, need, tag, map, full){
+    tag = tag || {};
+    const list = S.krx==='auto'
+      ? (S.krxUsed ? [S.krxUsed, ...KRX_ORDER.filter(k=>k!==S.krxUsed)] : KRX_ORDER)
+      : [S.krx];
+    let lastErr;
+    for(const k of list){
+      const t = {};
+      try{
+        const rows = map
+          ? await twoPhase((n,before)=>krwCandlesOn(k, coin, unit, n, t, before),
+                           map, need, full, KRW_EX[k].kind !== 'coinone')
+          : await krwCandlesOn(k, coin, unit, need, t);
+        Object.assign(tag, t); S.krxUsed = k;
+        return rows;
+      }catch(e){ lastErr = e; tag[KRW_EX[k].name] = e.message; }
+    }
+    throw lastErr || new Error('원화거래소 조회 실패');
+  }
+  // USDT/KRW는 거래소마다 사실상 같은 값 → 코인이 잡힌 곳부터 시도하고, 막히면 다른 곳에서 받는다
+  async function fxCandles(unit, need, tag, full){
+    const first = S.krxUsed || (S.krx==='auto' ? 'bithumb' : S.krx);
+    const order = [first, ...KRX_ORDER.filter(k=>k!==first)];
+    let lastErr;
+    for(const k of order){
+      try{
+        const rows = await twoPhase((n,before)=>krwCandlesOn(k,'USDT',unit,n,tag,before),
+                                    S.R, need, full, KRW_EX[k].kind !== 'coinone');
+        S.fxUsed = k;
+        return rows;
+      }catch(e){ lastErr = e; }
+    }
+    throw lastErr || new Error('USDT/KRW 조회 실패');
+  }
+  const tagTx = t => [t.v1!=null?`v1 ${t.v1}`:null, t.v1note||null, t.lg!=null?`구API ${t.lg}`:null,
+                      t.v1err?`v1 실패(${t.v1err})`:null, t.lgerr?`구API 실패(${t.lgerr})`:null]
+                     .filter(Boolean).join(' · ');
+
+  /* ---------- 해외 거래소 ---------- */
+  // url(pair, unit, n, endMs) — endMs가 주어지면 그 시각 이전(과거) 구간
+  const EX = {
+    // Gate는 limit과 from/to를 함께 보내면 요청을 거부한다 → 백필은 from/to만 사용
+    gate:{name:'Gate.io', max:1000, pair:s=>s+'_USDT',
+      url:(p,u,n,e)=>{
+        const b=`https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair=${p}&interval=${({1:'1m',5:'5m',15:'15m',60:'1h'})[u]}`;
+        return e ? `${b}&from=${Math.floor((e-n*u*60000)/1000)}&to=${Math.floor(e/1000)}` : `${b}&limit=${n}`;
+      },
+      map:j=>{if(!Array.isArray(j))throw new Error('무효 응답');return j.map(r=>[+r[0]*1000,+r[2]])}},
+    mexc:{name:'MEXC', max:1000, pair:s=>s+'USDT',
+      url:(p,u,n,e)=>`https://api.mexc.com/api/v3/klines?symbol=${p}&interval=${({1:'1m',5:'5m',15:'15m',60:'60m'})[u]}&limit=${n}`+(e?`&endTime=${e}`:''),
+      map:j=>{if(!Array.isArray(j))throw new Error('무효 응답');return j.map(r=>[+r[0],+r[4]])}},
+    binance:{name:'Binance', max:1000, pair:s=>s+'USDT',
+      url:(p,u,n,e)=>`https://api.binance.com/api/v3/klines?symbol=${p}&interval=${({1:'1m',5:'5m',15:'15m',60:'1h'})[u]}&limit=${n}`+(e?`&endTime=${e}`:''),
+      map:j=>{if(!Array.isArray(j))throw new Error('무효 응답');return j.map(r=>[+r[0],+r[4]])}},
+    bybit:{name:'Bybit', max:1000, pair:s=>s+'USDT',
+      url:(p,u,n,e)=>`https://api.bybit.com/v5/market/kline?category=spot&symbol=${p}&interval=${({1:'1',5:'5',15:'15',60:'60'})[u]}&limit=${n}`+(e?`&end=${e}`:''),
+      map:j=>{const l=j?.result?.list; if(!Array.isArray(l)||!l.length)throw new Error(j?.retMsg||'무효 응답');
+              return l.map(r=>[+r[0],+r[4]])}},
+    okx:{name:'OKX', max:300, pair:s=>s+'-USDT',
+      url:(p,u,n,e)=>`https://www.okx.com/api/v5/market/candles?instId=${p}&bar=${({1:'1m',5:'5m',15:'15m',60:'1H'})[u]}&limit=${n}`+(e?`&after=${e}`:''),
+      map:j=>{if(!Array.isArray(j?.data)||!j.data.length)throw new Error(j?.msg||'무효 응답');
+              return j.data.map(r=>[+r[0],+r[4]])}},
+    bitget:{name:'Bitget', max:1000, pair:s=>s+'USDT',
+      url:(p,u,n,e)=>`https://api.bitget.com/api/v2/spot/market/candles?symbol=${p}&granularity=${({1:'1min',5:'5min',15:'15min',60:'1h'})[u]}&limit=${n}`+(e?`&endTime=${e}`:''),
+      map:j=>{if(!Array.isArray(j?.data)||!j.data.length)throw new Error(j?.msg||'무효 응답');
+              return j.data.map(r=>[+r[0],+r[4]])}},
+    // Coinbase Exchange — 배열 [t(sec), low, high, open, close, volume], 1요청 300개, start/end로 과거 조회
+    coinbase:{name:'Coinbase', max:300, pair:s=>[s+'-USDT', s+'-USD'],
+      url:(p,u,n,e)=>{
+        const g = ({1:60,5:300,15:900,60:3600})[u];
+        const b = `https://api.exchange.coinbase.com/products/${p}/candles?granularity=${g}`;
+        if(!e) return b;
+        const end = Math.floor(e/1000), start = end - Math.min(n, 300)*g;
+        return `${b}&start=${new Date(start*1000).toISOString()}&end=${new Date(end*1000).toISOString()}`;
+      },
+      map:j=>{ if(!Array.isArray(j)) throw new Error(j?.message || '무효 응답');
+               if(!j.length) throw new Error('빈 응답');
+               return j.map(r=>[+r[0]*1000, +r[4]]); }},
+    // Kraken — result의 첫 키가 페어 배열, [t(sec), o, h, l, c, vwap, vol, cnt], 최근 720개 고정(과거 조회 없음)
+    kraken:{name:'Kraken', max:720, noPage:true, pair:s=>[s+'USDT', s+'USD'],
+      url:(p,u)=>`https://api.kraken.com/0/public/OHLC?pair=${p}&interval=${({1:1,5:5,15:15,60:60})[u]||1}`,
+      map:j=>{ if(Array.isArray(j?.error) && j.error.length) throw new Error(j.error.join(', '));
+               const res = j?.result || {};
+               const k = Object.keys(res).find(x=>x!=='last');
+               const arr = k ? res[k] : null;
+               if(!Array.isArray(arr) || !arr.length) throw new Error('무효 응답');
+               return arr.map(r=>[+r[0]*1000, +r[4]]); }},
+    kucoin:{name:'KuCoin', max:1500, pair:s=>s+'-USDT',
+      url:(p,u,n,e)=>`https://api.kucoin.com/api/v1/market/candles?type=${({1:'1min',5:'5min',15:'15min',60:'1hour'})[u]}&symbol=${p}`
+              +(e?`&startAt=${Math.floor((e-n*u*60000)/1000)}&endAt=${Math.floor(e/1000)}`:''),
+      map:j=>{if(!Array.isArray(j?.data)||!j.data.length)throw new Error(j?.msg||'무효 응답');
+              return j.data.map(r=>[+r[0]*1000,+r[2]])}},
+  };
+  const ORDER = ['gate','mexc','bitget','bybit','okx','binance','kucoin','coinbase','kraken'];
+
+  // beforeMs가 주어지면 그 시각 이전(과거)부터 이어받는다. 한 번에 최대 2페이지만 — 폭주 요청은 차단을 부른다
+  async function exOne(key, sym, unit, need, beforeMs){
+    const e = EX[key], manual = $('gpair').value.trim();
+    const pk = `${key}|${sym}`;
+    // Coinbase·Kraken은 USDT 마켓이 없으면 USD 마켓으로 — 되는 페어를 찾아 기억한다
+    let pairs = manual ? [manual.toUpperCase()]
+              : (S.pairOk[pk] ? [S.pairOk[pk]] : [].concat(e.pair(sym)));
+    const fetchPage = async (n, end) => {
+      let lastErr = null;
+      for(const pair of pairs){
+        for(let a=0; a<2; a++){                       // 페이지·페어마다 1회 재시도
+          try{
+            const rows = e.map(await J(e.url(pair, unit, n, end)));
+            S.pairOk[pk] = pair; pairs = [pair];
+            return rows;
+          }catch(err){ lastErr = err; if(a===0) await sleep(300); }
+        }
+      }
+      throw lastErr || new Error('빈 응답');
+    };
+    const out=[]; let end = beforeMs ? beforeMs-1 : null, guard=0;
+    const maxPage = e.noPage ? 1 : Math.min(2, Math.ceil(need/e.max)+ (beforeMs?0:1));
+    while(out.length < need && guard++ < maxPage){
+      if(guard>1) await sleep(250);
+      const n = Math.min(e.max, Math.max(2, need-out.length));
+      let rows=null, lastErr=null;
+      try{ rows = await fetchPage(n, end); }catch(err){ lastErr = err; }
+      if(!rows){ if(guard===1 && !out.length) throw lastErr; break; }
+      if(!rows.length) break;
+      let oldest = Infinity;
+      for(const r of rows){ out.push(r); if(r[0]<oldest) oldest=r[0]; }
+      if(end!=null && oldest >= end) break;          // 더 과거로 못 감
+      end = oldest - 1;
+      if(rows.length < n) break;                     // 상장 이전까지 도달
+    }
+    if(!out.length) throw new Error('빈 응답');
+    return out;
+  }
+
+  // 최신 꼬리 + 과거 이어받기를 한 번에. 한쪽이 실패해도 다른 쪽은 살린다
+  async function twoPhase(fetchFn, map, need, full, canPage=true){
+    if(!full) return fetchFn(4, null);
+    if(!map.size || !canPage) return fetchFn(need, null);
+    const [t,bk] = await Promise.all([
+      settle(fetchFn(4, null)),
+      settle(fetchFn(Math.max(2, need - map.size), minKey(map)))
+    ]);
+    const rows = [...(t.value||[]), ...(bk.value||[])];
+    if(!rows.length) throw (t.reason || bk.reason || new Error('빈 응답'));
+    return rows;
+  }
+  // full 조회일 때 자동탐색이면, 히스토리가 너무 짧으면 다른 거래소도 확인해 더 긴 쪽을 채택
+  async function overseas(sym, unit, need, log, full){
+    const list = S.ex==='auto' ? (S.winner?[S.winner,...ORDER.filter(k=>k!==S.winner)]:ORDER) : [S.ex];
+    let best=null, bestKey=null, ok=0, lastErr;
+    for(const k of list){
+      try{
+        const rows = await twoPhase((n,before)=>exOne(k, sym, unit, n, before),
+                                    S.G, need, full, !EX[k].noPage);
+        log.push([EX[k].name, true, rows.length+'봉'+(full?'':' · 갱신분')]);
+        if(!best || rows.length > best.length){ best=rows; bestKey=k; }
+        ok++;
+        if(!full || S.ex!=='auto' || best.length >= need*0.8 || ok >= 3) break;
+      }catch(e){ lastErr=e; log.push([EX[k].name,false,e.message]); }
+    }
+    if(!best) throw new Error(lastErr?lastErr.message:'해외 거래소 조회 실패');
+    S.winner = bestKey; S.exName = EX[bestKey].name;
+    return best;
+  }
+
+  /* ---------- 병합 ---------- */
+  function merge(map, rows, unit){
+    const w = unit*MINMS;
+    for(const [t,c] of rows){
+      if(!isFinite(t)||!isFinite(c)||c<=0) continue;
+      const b = Math.floor(t/w)*w;
+      const cur = map.get(b);
+      if(!cur || t >= cur[0]) map.set(b,[t,c]);
+    }
+    if(map.size > 20000){                      // 오래된 것부터 정리
+      const ks=[...map.keys()].sort((a,b)=>a-b);
+      for(let i=0;i<ks.length-18000;i++) map.delete(ks[i]);
+    }
+  }
+  const val = (m,k)=>{const v=m.get(k);return v?v[1]:undefined};
+
+  // 거래가 뜸한 코인은 양쪽 봉이 같은 분에 동시에 있는 경우가 드물다.
+  // 두 시계열의 합집합 시각마다 각자 "직전 값"을 쓰되, 너무 오래된 값(10봉 초과)은 쓰지 않는다.
+  function rebuild(){
+    const kK=[...S.K.keys()].sort((a,b)=>a-b);
+    const gK=[...S.G.keys()].sort((a,b)=>a-b);
+    if(!kK.length || !gK.length) return;
+    const rK = S.mode==='cmp' ? [] : [...S.R.keys()].sort((a,b)=>a-b);
+    if(S.mode!=='cmp' && !rK.length) return;
+
+    const all = [...new Set([...kK, ...gK])].sort((a,b)=>a-b);
+    // 직전 체결가는 짧게만 이어 쓴다(최대 30분). 길게 끌면 급등 직전 가격을 몇 시간 뒤
+    // 상대 가격과 짝지어 ±100% 같은 허위 프리미엄이 만들어진다. 긴 공백은 아래 구멍 메우기가 채운다.
+    const stale = Math.max(S.unit*3, 30) * MINMS;
+    let ki=0, gi=0, ri=0, kv=null, kt=0, gv=null, gt=0, fx=null;
+    const out=[];
+    for(const t of all){
+      while(ki<kK.length && kK[ki]<=t){ kt=kK[ki]; kv=val(S.K,kt); ki++; }
+      while(gi<gK.length && gK[gi]<=t){ gt=gK[gi]; gv=val(S.G,gt); gi++; }
+      while(ri<rK.length && rK[ri]<=t){ fx=val(S.R,rK[ri]); ri++; }
+      if(kv==null || gv==null) continue;
+      if(t-kt > stale || t-gt > stale) continue;     // 오래된 값으로 메우지 않음 → 그래프가 끊긴다
+      if(S.mode==='cmp'){
+        out.push({t, prem:(kv-gv)/gv*100, krw:kv, usdt:gv, fx:1, th:gv});
+      }else{
+        const f = fx ?? val(S.R, rK[0]);
+        if(!f) continue;
+        const th = gv*f;
+        out.push({t, prem:(kv-th)/th*100, krw:kv, usdt:gv, fx:f, th});
+      }
+    }
+    if(out.length){ S.series = out; S.seriesKey = S.cacheKey; }
+  }
+
+  /* ---------- 해상도 ---------- */
+  function pickUnit(){
+    if(S.tfMode) return S.tfMode;
+    // 표시 봉 수가 상한 이하가 되는 가장 촘촘한 단위. 코인원은 1요청 500봉이 최대
+    const usingCoinone = S.mode !== 'cmp' &&
+      (S.krx === 'coinone' || (S.krx === 'auto' && S.krxUsed === 'coinone'));
+    const cap = usingCoinone ? 500 : 1000;
+    for(const u of [1,5,15,60]) if(S.spanMin/u <= cap) return u;
+    return 60;
+  }
+
+  /* ---------- load ---------- */
+  async function load(){
+    if(S.busy){ S.pending = true; return; }          // 로딩 중 들어온 요청은 버리지 말고 예약
+    S.busy=true; S.pending=false;
+    try{ await loadCore(); }
+    catch(e){                                        // 예기치 못한 오류로 busy가 잠기지 않도록
+      S.busy=false; stat('오류','bad');
+      say('err', `내부 오류가 발생했습니다: ${e.message}`);
+      console.error(e);
+    }
+  }
+  async function loadCore(){
+    const unit = pickUnit();
+    const key = S.mode==='cmp'
+      ? `cmp|${S.sym}|${S.cmpA}|${S.cmpB}|${unit}|${$('gpair').value.trim()}`
+      : `${S.sym}|${S.krx}|${S.ex}|${unit}|${$('gpair').value.trim()}`;
+    // 해상도/기간이 바뀌면 버킷 캐시만 비우고, 화면의 직전 시리즈는 새 데이터가 올 때까지 유지
+    if(key !== S.cacheKey){ S.cacheKey=key; S.K.clear(); S.G.clear(); S.R.clear();
+      S.unit=unit; S.fullDone=0; S.backfilling=false; S.lastOldest=null; S.bfRounds=0;
+      S.repairTried=new Set(); }
+    const wasBackfilling = !!S.backfilling;
+    const need = Math.ceil(S.spanMin/unit) + 4;
+    const full = need > (S.fullDone||0);             // 처음이거나 줌아웃 → 전체, 아니면 꼬리만
+    const n = full ? Math.min(5000, need) : 4;
+    const log = [];
+    if(!S.series.length) stat('불러오는 중…','');
+
+    const prevWinner = S.winner, tagK = {}, tagR = {};
+    let krR, exR, fxR;
+    if(S.mode==='cmp'){
+      // 기준 A → S.G, 대상 B → S.K. 둘 다 USDT라 환율은 필요 없음
+      [exR, krR] = await Promise.allSettled([
+        twoPhase((m,before)=>exOne(S.cmpA, S.sym, unit, m, before), S.G, n, full),
+        twoPhase((m,before)=>exOne(S.cmpB, S.sym, unit, m, before), S.K, n, full)
+      ]);
+      fxR = {status:'fulfilled', value:[]};
+      log.push([EX[S.cmpA].name+' (기준)', exR.status==='fulfilled',
+        exR.status==='fulfilled' ? exR.value.length+'봉' : exR.reason.message]);
+      log.push([EX[S.cmpB].name+' (대상)', krR.status==='fulfilled',
+        krR.status==='fulfilled' ? krR.value.length+'봉' : krR.reason.message]);
+    }else{
+      const prevKrx = S.krxUsed;
+      // settle을 즉시 붙여야 await 중 거절이 unhandled로 새지 않는다
+      const exP = settle(overseas(S.sym, unit, n, log, full));
+      // 코인이 어느 원화거래소에서 잡히는지 먼저 확정한 뒤, 같은 거래소에서 환율을 가져온다
+      krR = await settle(krwCandles(S.sym, unit, n, tagK, S.K, full));
+      const prevFx = S.fxUsed;
+      [exR, fxR] = await Promise.all([exP, settle(fxCandles(unit, n, tagR, full))]);
+      if(S.fxUsed !== prevFx) S.R.clear();            // 환율 출처가 바뀌면 환율 캐시는 버림
+      if(S.krxUsed !== prevKrx){ S.K.clear(); S.R.clear(); }   // 원화거래소가 바뀌면 캐시 초기화
+      if(S.winner !== prevWinner) S.G.clear();        // 해외 거래소가 바뀌면 해외 캐시는 버림
+      log.unshift([krxName()+' '+S.sym+'/KRW', krR.status==='fulfilled',
+        krR.status==='fulfilled' ? `${krR.value.length}봉 (${tagTx(tagK)})`+(full?'':' · 갱신분')
+                                 : krR.reason.message]);
+      log.push([(S.fxUsed?KRW_EX[S.fxUsed].name:krxName())+' USDT/KRW', fxR.status==='fulfilled',
+        (fxR.status==='fulfilled' ? `${fxR.value.length}봉 (${tagTx(tagR)})` : fxR.reason.message)
+        + (full ? '' : ' · 갱신분')]);
+    }
+    if(full && krR.status==='fulfilled') S.srcTx = S.mode==='cmp' ? '' : tagTx(tagK);
+
+    if(krR.status==='fulfilled') merge(S.K, krR.value, unit);
+    if(exR.status==='fulfilled') merge(S.G, exR.value, unit);
+    if(fxR.status==='fulfilled') merge(S.R, fxR.value, unit);
+    // 실제로 모인 봉 수만큼만 완료로 기록 → 부족하면 다음 폴링이 과거를 이어서 채운다
+    const hardFail = [krR,exR,fxR].some(r=>r.status!=='fulfilled');
+
+    // ── 구멍 메우기: 표시 구간 안에 빠진 범위가 있으면 그 범위만 콕 집어 다시 받는다
+    // 과거 이어받기가 끝난 뒤에 실행한다(둘이 겹치면 요청이 불필요하게 몰린다)
+    let repaired = false, gapLeft = false;
+    if(!hardFail && !wasBackfilling){
+      const newest = Math.max(maxKey(S.K)||0, maxKey(S.G)||0);
+      const from = newest - S.spanMin*MINMS;
+      S.repairTried = S.repairTried || new Set();
+      for(const side of ['K','G']){
+        const map = side==='K' ? S.K : S.G;
+        for(let n=0; n<2; n++){                       // 한 회차에 큰 구멍 2개까지
+          const gap = findGap(map, from, newest, unit);
+          if(!gap) break;
+          gapLeft = true;
+          const mark = `${side}:${gap.from}`;
+          if(S.repairTried.has(mark) || S.repairTried.size > 60) break;
+          S.repairTried.add(mark);
+          const cnt = Math.min(1000, Math.ceil(gap.len/(unit*MINMS)) + 2);
+          try{
+            let rows;
+            if(side==='G') rows = await exOne(S.mode==='cmp' ? S.cmpA : (S.winner||S.ex), S.sym, unit, cnt, gap.to);
+            else if(S.mode==='cmp') rows = await exOne(S.cmpB, S.sym, unit, cnt, gap.to);
+            else rows = await krwCandlesOn(S.krxUsed || (S.krx==='auto'?'bithumb':S.krx), S.sym, unit, cnt, {}, gap.to);
+            const before = map.size;
+            if(rows?.length) merge(map, rows, unit);
+            if(map.size > before) repaired = true;     // 실제로 채워졌을 때만 계속 시도
+            else break;                                // 그 구간엔 데이터가 없다 → 중단
+          }catch(e){ break; }                         // 다음 회차에 다시 시도
+        }
+      }
+    }
+
+    // 실제로 모인 봉 수만큼만 완료로 기록 → 부족하면 다음 폴링이 과거를 이어서 채운다
+    if(!hardFail){
+      const got = Math.min(S.K.size||0, S.G.size||0);
+      // 실제로 "더 과거"에 닿았을 때만 계속 이어받는다. 더 못 가면 그 거래소 데이터의 시작점
+      const oldest = Math.min(minKey(S.G) ?? Infinity, minKey(S.K) ?? Infinity);
+      const wentBack = oldest < (S.lastOldest ?? Infinity);
+      S.lastOldest = oldest;
+      // 더 과거로 못 가면 그게 데이터의 시작점 → 완료로 간주하고 이후엔 꼬리만 갱신
+      S.fullDone = wentBack ? Math.max(S.fullDone||0, Math.min(need, got)) : need;
+      S.backfilling = ((got < need*0.98 && wentBack) || (gapLeft && repaired)) && (S.bfRounds||0) < 40;
+    }
+    rebuild();
+
+    const fresh = S.seriesKey === S.cacheKey;
+    // 미상장·잘못된 파라미터는 다시 시도해도 같으므로 재시도를 건너뛴다
+    if(log.some(([,ok,d])=>!ok && /마켓 없음|마켓이 없|HTTP 404|HTTP 400/.test(d))) S.retryN = 3;
+    if(S.series.length && fresh){
+      S.lastOk = Date.now();
+      applyLabels();
+      const pairTx = S.mode==='cmp' ? `${nameBase()}→${nameTarget()}` : S.exName;
+      const stale = Date.now() - S.series[S.series.length-1].t > unit*MINMS*3;
+      const hard = (S.mode==='cmp'
+          ? [[nameBase(),exR],[nameTarget(),krR]]
+          : [[krxName()+' '+S.sym,krR],['해외',exR],['USDT/KRW',fxR]]
+        ).filter(([,r])=>r.status==='rejected');
+      if(hard.length){
+        say('warn', `갱신 실패 — 직전 데이터를 유지합니다. <span class="mute">${hard.map(([n2,r])=>n2+': '+r.reason.message).join(' / ')}</span>`);
+        stat(`${pairTx} · ${spanTx(S.spanMin)} · ${unit}m · 갱신실패`,' warn');
+      }else{
+        const cov = (S.series[S.series.length-1].t - S.series[0].t)/MINMS;
+        if(cov < S.spanMin*0.8){                       // 요청 기간보다 데이터가 짧음
+          const kS=minKey(S.K), gS=minKey(S.G), late = gS>kS+unit*MINMS*2;
+          say('warn',
+            `요청한 <b>${spanTx(S.spanMin)}</b> 중 <b>${spanTx(cov)}</b>만 표시됩니다 — 두 거래소가 겹치는 구간이 여기까지입니다.`
+            + `<br><span class="mute">${nameTarget()} 데이터 시작 ${stamp(kS)}${S.srcTx?` [${S.srcTx}]`:''} · ${nameBase()} 데이터 시작 ${stamp(gS)}</span>`
+            + (S.mode!=='cmp' && S.krxUsed==='coinone' && need>500
+                ? `<br><b>코인원은 한 번에 500봉까지만 제공하고 과거 조회가 없습니다</b>(${unit}m 기준 ${spanTx(500*unit)}).`
+                  + ` 이 기간 전체를 보려면 해상도를 <code>${unit<5?'5m':unit<15?'15m':'1h'}</code> 이상으로 올리거나 <b>자동</b>으로 두세요.`
+                : (late ? `<br>${nameBase()}의 <b>${S.sym}</b> 데이터가 그 이전엔 없습니다. 다른 거래소로 바꾸면 더 긴 구간이 나올 수 있어요.` : '')));
+        }else{
+          say(stale ? 'warn' : '', stale ? '최근 봉이 갱신되지 않고 있습니다. 거래가 없거나 응답이 지연되는 중일 수 있어요.' : '');
+        }
+        stat(`${pairTx} · ${spanTx(S.spanMin)} · ${unit}m · ${S.series.length}봉`
+             + (S.backfilling ? ` · 과거 수집 중…` : ` · ${hhmm(Date.now())}`),
+             stale?' warn':(S.rf>0?' live':''));
+      }
+    }else if((S.retryN||0) < 3){
+      // 아직 자동 재시도가 남아 있으면 실패로 단정하지 않는다
+      stat('재시도 중…',' warn');
+      say('warn', `응답이 없어 다시 시도하는 중입니다… <span class="mute">${
+        log.filter(([,ok])=>!ok).map(f=>f[0]+': '+f[2]).join(' / ')}</span>`);
+    }else if(S.mode!=='cmp' && S.krx!=='auto' && krR.status==='rejected' && !S.krxSwitched){
+      // 고정한 원화거래소가 재시도 끝에도 실패하면(차단·미상장 모두) 자동탐색으로 넘어간다
+      const failName = KRW_EX[S.krx]?.name || S.krx;
+      const why = krR.reason?.message || '';
+      S.krxSwitched = true; S.krx = 'auto'; $('krx').value = 'auto';
+      S.krxUsed = ''; S.fxUsed = ''; S.K.clear(); S.R.clear();
+      S.cacheKey = ''; S.retryN = 0;
+      applyLabels();
+      stat('원화거래소 자동탐색으로 전환',' warn');
+      say('warn', `<b>${failName}</b>에서 <b>${S.sym}</b>를 받지 못해 <b>자동탐색</b>으로 전환했습니다.`
+        + ` 상장돼 있는 원화거래소를 찾는 중입니다…${why?` <span class="mute">(${why})</span>`:''}`);
+      render(); S.busy=false; setTimeout(load, 300); return;
+    }else if(S.mode!=='cmp' && S.ex!=='auto' && exR.status==='rejected' && !S.exSwitched){
+      // 고정한 해외 거래소가 재시도 끝에도 막히면 자동탐색으로 넘어간다
+      const blockedName = EX[S.ex]?.name || S.ex;
+      S.exSwitched = true; S.ex = 'auto'; $('ex').value = 'auto';
+      S.winner = null; S.cacheKey = ''; S.retryN = 0;
+      stat('자동탐색으로 전환','warn');
+      say('warn', `<b>${blockedName}</b>가 계속 차단되어 <b>자동탐색</b>으로 전환했습니다. 되는 거래소를 찾는 중입니다…`);
+      render(); S.busy=false; setTimeout(load, 300); return;
+    }else{
+      stat('오류',' bad');
+      const rows = log.map(([n2,ok,d])=>`<tr><td>${n2}</td><td class="${ok?'ok':'no'}">${ok?'성공':'실패'}</td><td>${d}</td></tr>`).join('');
+      const blocked = log.some(([,ok,d])=>!ok && /Failed to fetch|NetworkError|Load failed|HTTP 40[13]|HTTP 45[13]/i.test(d));
+      const noMarket = log.some(([,ok,d])=>!ok && /마켓 없음|마켓이 없|HTTP 404/.test(d));
+      say('err', `조회에 실패했습니다.${S.series.length?' <b>화면은 직전 조회 결과입니다.</b>':''}`
+        + ` <button id="msgDiag" style="padding:4px 10px;font-size:12px">연결 테스트 실행</button><table>${rows}</table>`
+        + (noMarket?`<br>해당 거래소에 <b>${S.sym}</b>이(가) 상장돼 있지 않습니다. <b>원화거래소</b>를 <code>자동탐색</code>으로 두면 상장된 곳을 알아서 찾습니다.`:'')
+        + (blocked?`<br><b>거래소가 브라우저 요청을 막고 있습니다.</b> 아래 순서로 해결됩니다.`
+            + `<br>① <b>해외 거래소</b>를 <code>자동탐색</code>으로 — 막힌 곳을 건너뛰고 되는 곳을 씁니다.`
+            + `<br>② 이 파일을 <code>file://</code>로 열면 Origin이 <code>null</code>이라 Cloudflare가 특히 잘 막습니다. `
+            + `파일이 있는 폴더에서 <code>python -m http.server 8000</code> 실행 후 `
+            + `<code>http://localhost:8000/</code>으로 열면 Gate도 대부분 통과합니다.`
+            + `<br>③ 고급 설정에서 프록시를 <code>allorigins</code> / <code>cors.lol</code>로 고정.`:''));
+    }
+    render();
+    S.busy=false;
+    if(S.pending){ S.pending=false; setTimeout(load, 0); return; }   // 예약된 요청 우선
+    // 일시적 차단이면 간격을 늘려가며 세 번까지 자동 재시도
+    if(fresh && S.series.length) S.retryN = 0;
+    else if((S.retryN||0) < 3){
+      S.retryN=(S.retryN||0)+1;
+      setTimeout(load, [1500,3000,5000][S.retryN-1]);
+    }
+    // 과거 구간이 아직 덜 찼고 직전 라운드에서 진전이 있었으면 이어서 채운다 (상한 30회)
+    if(S.backfilling && S.series.length && fresh){ S.bfRounds=(S.bfRounds||0)+1; setTimeout(load, 1200); }
+  }
+
+  /* ---------- chart ---------- */
+  let geo=null;
+  function visible(){
+    const d=S.series; if(!d.length) return [];
+    const end = d[d.length-1].t, start = end - S.spanMin*MINMS;
+    const v = d.filter(p=>p.t>=start);
+    return v.length>1 ? v : d.slice(-2);
+  }
+  function render(){
+    const dpr=Math.min(2,window.devicePixelRatio||1), W=cv.clientWidth, H=cv.clientHeight;
+    cv.width=W*dpr; cv.height=H*dpr; ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,W,H);
+    const css=getComputedStyle(document.documentElement), C=k=>css.getPropertyValue(k).trim();
+    const P={l:14,r:66,t:16,b:26}, x0=P.l, x1=W-P.r, y0=P.t, y1=H-P.b;
+    const d = S.started ? visible() : [];
+    if(d.length){
+      const cover = (d[d.length-1].t - d[0].t)/MINMS;
+      const short = cover < S.spanMin*0.9;
+      $('zoomHint').innerHTML = `${spanTx(S.spanMin)} · ${S.unit}m · 휠로 기간 조절`
+        + (short ? `   (보유 데이터 ${spanTx(Math.max(1,cover))})` : '')
+        + `<br><span style="opacity:.65">데이터 시작 — ${nameTarget()} ${stamp(minKey(S.K) ?? d[0].t)} · ${nameBase()} ${stamp(minKey(S.G) ?? d[0].t)}${usdNote()}</span>`;
+    }else $('zoomHint').innerHTML = '휠 스크롤로 기간 조절';
+    if(!d.length){ ctx.fillStyle=C('--tx3'); ctx.font='13px system-ui'; ctx.textAlign='center';
+      ctx.fillText(S.started ? '데이터 없음' : '티커를 입력하고 [조회]를 누르세요', W/2, H/2);
+      // 이전 조회 값이 남아 오해를 주지 않도록 통계 타일 초기화
+      for(const id of ['s_now','s_max','s_min','s_avg','s_krw','s_gate','s_rate']){
+        $(id).textContent='–'; $(id).className = id==='s_now' ? 'v mute' : 'v sm mute';
+      }
+      geo=null; return; }
+
+    const t0=d[0].t, t1=d[d.length-1].t, tSpan=Math.max(1,t1-t0);
+    let lo=Math.min(0,...d.map(p=>p.prem)), hi=Math.max(0,...d.map(p=>p.prem));
+    const pad=Math.max((hi-lo)*0.14,0.15); lo-=pad; hi+=pad;
+    const X=t=>x0+(x1-x0)*(t-t0)/tSpan, Y=v=>y1-(y1-y0)*(v-lo)/(hi-lo);
+    geo={X,Y,x0,x1,y0,y1,t0,t1,tSpan,d};
+
+    const step=(()=>{const raw=(hi-lo)/5,e=Math.pow(10,Math.floor(Math.log10(raw))),n=raw/e;
+      return (n<1.5?1:n<3?2:n<7?5:10)*e})();
+    const lastY = Y(d[d.length-1].prem);
+    ctx.font='11px ui-monospace,monospace'; ctx.textBaseline='middle';
+    for(let v=Math.ceil(lo/step)*step; v<=hi; v+=step){
+      const y=Y(v);
+      ctx.strokeStyle=C('--line'); ctx.lineWidth=1; ctx.setLineDash([]); ctx.globalAlpha=.45;
+      ctx.beginPath(); ctx.moveTo(x0,Math.round(y)+.5); ctx.lineTo(x1,Math.round(y)+.5); ctx.stroke(); ctx.globalAlpha=1;
+      if(Math.abs(y-lastY) > 11){                       // 현재값 태그와 겹치면 생략
+        ctx.fillStyle=C('--tx3'); ctx.textAlign='left';
+        ctx.fillText(v.toFixed(Math.abs(step)<0.1?2:1)+'%', x1+8, y);
+      }
+    }
+    ctx.fillStyle=C('--tx3'); ctx.textAlign='center'; ctx.textBaseline='top';
+    const nx=Math.max(2,Math.min(7,Math.floor((x1-x0)/95))), multiDay=tSpan>20*3600e3;
+    for(let i=0;i<nx;i++){
+      const t=t0+tSpan*i/(nx-1);
+      ctx.fillText((multiDay?mmdd(t)+' ':'')+hhmm(t), Math.min(x1-18,Math.max(x0+18,X(t))), y1+7);
+    }
+
+    const yz=Y(0);
+    // 보간 한도를 넘는 공백은 이어 그리지 않는다 (없는 값을 지어내지 않기 위해)
+    const gapMs = Math.max(S.unit*3, 30) * MINMS;
+    const segs=[]; let cur=[d[0]];
+    for(let i=1;i<d.length;i++){
+      if(d[i].t - d[i-1].t > gapMs){ segs.push(cur); cur=[d[i]]; } else cur.push(d[i]);
+    }
+    segs.push(cur);
+
+    const strokePath=()=>{ ctx.beginPath();
+      for(const s of segs){ ctx.moveTo(X(s[0].t),Y(s[0].prem));
+        for(let i=1;i<s.length;i++) ctx.lineTo(X(s[i].t),Y(s[i].prem)); } };
+    const fillPath=()=>{ ctx.beginPath();
+      for(const s of segs){ if(s.length<2) continue;
+        ctx.moveTo(X(s[0].t), yz);
+        for(const q of s) ctx.lineTo(X(q.t), Y(q.prem));
+        ctx.lineTo(X(s[s.length-1].t), yz); ctx.closePath(); } };
+    const half=(top,bot,color)=>{
+      ctx.save(); ctx.beginPath(); ctx.rect(x0,top,x1-x0,Math.max(0,bot-top)); ctx.clip();
+      fillPath();
+      const g=ctx.createLinearGradient(0,y0,0,y1); g.addColorStop(0,color+'38'); g.addColorStop(1,color+'08');
+      ctx.fillStyle=g; ctx.fill();
+      strokePath(); ctx.strokeStyle=color; ctx.lineWidth=d.length>800?1:1.8; ctx.lineJoin='round'; ctx.stroke();
+      // 홀로 떨어진 점은 선이 없으니 점으로 표시
+      for(const s of segs) if(s.length===1){ ctx.fillStyle=color;
+        ctx.beginPath(); ctx.arc(X(s[0].t), Y(s[0].prem), 1.6, 0, 7); ctx.fill(); }
+      ctx.restore();
+    };
+    half(y0,Math.min(yz,y1),C('--up'));
+    half(Math.max(yz,y0),y1,C('--dn'));
+
+    ctx.lineWidth=1; ctx.setLineDash([]); ctx.strokeStyle=C('--tx3'); ctx.globalAlpha=.9;
+    ctx.beginPath(); ctx.moveTo(x0,Math.round(yz)+.5); ctx.lineTo(x1,Math.round(yz)+.5); ctx.stroke();
+    ctx.setLineDash([3,4]);
+    for(const [v,col] of [[1,C('--up')],[-1,C('--dn')]]) if(v>lo&&v<hi){
+      ctx.strokeStyle=col; ctx.globalAlpha=.6; ctx.beginPath(); ctx.moveTo(x0,Y(v)); ctx.lineTo(x1,Y(v)); ctx.stroke(); }
+    ctx.setLineDash([]); ctx.globalAlpha=1;
+
+    const lp=d[d.length-1], ly=Y(lp.prem);
+    ctx.fillStyle=lp.prem>=0?C('--up'):C('--dn');
+    ctx.beginPath(); ctx.arc(X(t1),ly,3.2,0,7); ctx.fill();
+    const lab=pc(lp.prem); ctx.font='11px ui-monospace,monospace';
+    const lw=ctx.measureText(lab).width+10;
+    ctx.fillRect(x1+4,ly-9,lw,18);
+    ctx.fillStyle='#0d1117'; ctx.textAlign='center'; ctx.textBaseline='middle'; ctx.fillText(lab,x1+4+lw/2,ly);
+
+    if(S.hover!=null && d[S.hover]){
+      const p=d[S.hover], hx=X(p.t), hy=Y(p.prem);
+      ctx.setLineDash([2,3]); ctx.strokeStyle=C('--tx3'); ctx.globalAlpha=.8; ctx.lineWidth=1;
+      ctx.beginPath(); ctx.moveTo(hx,y0); ctx.lineTo(hx,y1); ctx.stroke(); ctx.setLineDash([]); ctx.globalAlpha=1;
+      ctx.fillStyle=C('--bg'); ctx.strokeStyle=p.prem>=0?C('--up'):C('--dn'); ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(hx,hy,4,0,7); ctx.fill(); ctx.stroke();
+    }
+
+    const ps=d.map(p=>p.prem), mx=Math.max(...ps), mn=Math.min(...ps), av=ps.reduce((a,b)=>a+b,0)/ps.length;
+    $('s_now').textContent=pc(lp.prem); $('s_now').className='v '+cls(lp.prem);
+    $('s_max').textContent=pc(mx);      $('s_max').className='v sm '+cls(mx);
+    $('s_min').textContent=pc(mn);      $('s_min').className='v sm '+cls(mn);
+    $('s_avg').textContent=pc(av);      $('s_avg').className='v sm '+cls(av);
+    if(S.mode==='cmp'){
+      $('s_krw').textContent  = pxu(lp.krw)+' USDT';
+      $('s_gate').textContent = pxu(lp.th)+' USDT';
+      $('s_rate').textContent = pxu(lp.krw-lp.th)+' USDT';
+    }else{
+      $('s_krw').textContent  = px(lp.krw)+' 원';
+      $('s_gate').textContent = px(lp.th)+' 원';
+      $('s_rate').textContent = px(lp.fx)+' 원';
+    }
+  }
+
+  /* ---------- interaction ---------- */
+  cv.addEventListener('mousemove', e=>{
+    if(!geo) return;
+    const r=cv.getBoundingClientRect(), mx=e.clientX-r.left, d=geo.d;
+    const t = geo.t0 + (mx-geo.x0)/(geo.x1-geo.x0)*geo.tSpan;
+    let i=0, best=Infinity;
+    for(let k=0;k<d.length;k++){const v=Math.abs(d[k].t-t); if(v<best){best=v;i=k}}
+    S.hover=i; render();
+    const p=d[i];
+    tip.innerHTML=`<div class="t">${new Date(p.t).toLocaleString('ko-KR',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'})}</div>`
+      +(S.mode==='cmp'
+        ? `스프레드 <b class="${cls(p.prem)}">${pc(p.prem)}</b><br>${nameTarget()} ${pxu(p.krw)} USDT<br>`
+          +`${nameBase()} ${pxu(p.th)} USDT<br>차이 ${pxu(p.krw-p.th)} USDT`
+        : `프리미엄 <b class="${cls(p.prem)}">${pc(p.prem)}</b><br>${krxName()} ${px(p.krw)}원<br>`
+          +`${S.exName} ${px(p.usdt)} USDT<br>환산 ${px(p.th)}원`);
+    tip.style.opacity=1;
+    const tw=tip.offsetWidth, tx=geo.X(p.t);
+    tip.style.left=(tx+tw+22>cv.clientWidth? tx-tw-14 : tx+14)+'px';
+    tip.style.top=Math.max(6,Math.min(cv.clientHeight-tip.offsetHeight-6, geo.Y(p.prem)-20))+'px';
+  });
+  cv.addEventListener('mouseleave',()=>{S.hover=null;tip.style.opacity=0;render()});
+  window.addEventListener('resize',render);
+
+  // 휠 = 기간 조절
+  cv.addEventListener('wheel', e=>{
+    e.preventDefault();
+    const f = e.deltaY>0 ? 1.18 : 1/1.18;
+    const next = clamp(S.spanMin*f, MINSPAN, MAXSPAN);
+    if(next === S.spanMin) return;
+    S.spanMin = next;
+    [...$('span').children].forEach(c=>c.classList.remove('on'));
+    render();
+    clearTimeout(S.debounce);
+    S.debounce = setTimeout(()=>{
+      if(S.started && (pickUnit()!==S.unit || S.series.length < S.spanMin/pickUnit())) load();
+    }, 350);
+  }, {passive:false});
+
+  /* ---------- 거래소 연결 테스트 (BTC로 연결성만 확인) ---------- */
+  async function diagnose(){
+    const btn = $('diag'); btn.disabled = true; btn.textContent = '테스트 중…';
+    say('warn', '각 거래소에 BTC 1분봉을 한 번씩 요청하는 중입니다…');
+    const targets = [
+      ...KRX_ORDER.map(k => ({ name: KRW_EX[k].name+' (원화)',
+        fn: () => krwCandlesOn(k, 'BTC', 1, 2, {}) })),
+      ...ORDER.map(k => ({ name: EX[k].name, fn: () => exOne(k, 'BTC', 1, 2) })),
+    ];
+    const rows = await Promise.all(targets.map(async t => {
+      const t0 = performance.now();
+      try{ const r = await t.fn();
+        return [t.name, true, `${r.length}봉 · ${Math.round(performance.now()-t0)}ms`]; }
+      catch(e){ return [t.name, false, e.message]; }
+    }));
+    const ok = rows.filter(r=>r[1]).length;
+    say(ok ? 'warn' : 'err',
+      `<b>연결 테스트 결과</b> — ${rows.length}곳 중 <b>${ok}곳</b> 정상`
+      + `<table>${rows.map(([n,o,d])=>`<tr><td>${n}</td><td class="${o?'ok':'no'}">${o?'정상':'실패'}</td><td>${d}</td></tr>`).join('')}</table>`
+      + `<br><span class="mute">실패한 곳은 이 브라우저/네트워크에서 차단된 것입니다. 정상인 거래소로 선택하거나 해외 거래소를 <code>자동탐색</code>으로 두세요.</span>`);
+    btn.disabled = false; btn.textContent = '연결 테스트';
+  }
+
+  function applyLabels(){
+    const cmp = S.mode==='cmp';
+    document.body.classList.toggle('cmp', cmp);
+    $('subtitle').textContent = cmp ? ` · ${nameBase()} vs ${nameTarget()} (USDT)`
+                                    : ` · ${krxName()} KRW × 해외 USDT`;
+    $('k_now').textContent  = cmp ? '현재 스프레드' : '현재 프리미엄';
+    $('k_krw').textContent  = cmp ? `${nameTarget()} 가격` : `${krxName()} 가격`;
+    $('k_gate').textContent = cmp ? `${nameBase()} 가격` : `${S.exName||'해외'} 환산`;
+    $('k_rate').textContent = cmp ? '가격 차이'
+      : 'USDT/KRW' + (S.fxUsed && S.fxUsed !== S.krxUsed ? ` · ${KRW_EX[S.fxUsed].name}` : '');
+    $('formula').textContent = cmp
+      ? `스프레드 = (${nameTarget()} 종가 − ${nameBase()} 종가) ÷ ${nameBase()} 종가 × 100  (둘 다 USDT라 환율 무관)`
+      : '프리미엄 = (원화거래소 KRW 종가 − 해외 USDT 종가 × USDT/KRW) ÷ (해외 USDT 종가 × USDT/KRW) × 100';
+  }
+  function seg(id,fn){ $(id).addEventListener('click',e=>{
+    const b=e.target.closest('button'); if(!b) return;
+    [...$(id).children].forEach(c=>c.classList.toggle('on',c===b)); fn(b.dataset.v); }); }
+  const reload = () => { if(S.started) load(); };            // 조회 전에는 아무 요청도 하지 않음
+  seg('span', v=>{ S.spanMin=+v; render(); reload(); });
+  seg('tf',   v=>{ S.tfMode=+v; reload(); });
+  seg('rf',   v=>{ S.rf=+v; if(S.started) schedule(); });
+  seg('mode', v=>{ S.mode=v; S.cacheKey=''; S.series=[]; S.seriesKey=''; S.srcTx='';
+                   applyLabels(); render(); reload(); });
+  $('krx').addEventListener('change',e=>{
+    S.krx=e.target.value; S.krxUsed = e.target.value==='auto' ? '' : e.target.value;
+    S.krxSwitched=false; S.fxUsed=''; S.K.clear(); S.R.clear();
+    S.cacheKey=''; S.series=[]; S.seriesKey=''; S.srcTx='';
+    applyLabels(); reload();
+  });
+  // 비교 모드용 거래소 목록 채우기
+  for(const sel of ['exA','exB']){
+    $(sel).innerHTML = ORDER.map(k=>`<option value="${k}">${EX[k].name}</option>`).join('');
+    $(sel).value = sel==='exA' ? S.cmpA : S.cmpB;
+    $(sel).addEventListener('change', e=>{
+      if(sel==='exA') S.cmpA=e.target.value; else S.cmpB=e.target.value;
+      if(S.cmpA===S.cmpB){                       // 같은 거래소면 다른 하나로 밀어줌
+        const other = ORDER.find(k=>k!==S.cmpA);
+        if(sel==='exA'){ S.cmpB=other; $('exB').value=other; }
+        else { S.cmpA=other; $('exA').value=other; }
+      }
+      S.cacheKey=''; S.series=[]; S.seriesKey=''; applyLabels(); reload();
+    });
+  }
+  $('ex').addEventListener('change',e=>{
+    S.ex=e.target.value; S.exSwitched=false;      // 사용자가 직접 고르면 자동전환 기록 초기화
+    S.winner=null; S.cacheKey=''; S.series=[]; S.seriesKey=''; reload();
+  });
+  $('proxy').addEventListener('change',e=>{
+    $('proxyCustom').style.display = e.target.value==='custom'?'':'none';
+    S.route.clear(); reload();
+  });
+  function schedule(){ clearInterval(S.timer); if(S.rf>0) S.timer=setInterval(load,S.rf*1000); }
+  function go(){ S.sym=($('sym').value.trim().toUpperCase()||'BTC'); $('sym').value=S.sym;
+    S.started=true; S.winner=null; S.exSwitched=false; S.krxSwitched=false;
+    if(S.krx==='auto') S.krxUsed='';
+    S.cacheKey=''; S.series=[]; S.seriesKey=''; load(); schedule(); }
+  $('go').addEventListener('click',go);
+  $('diag').addEventListener('click',diagnose);
+  $('msg').addEventListener('click',e=>{ if(e.target.id==='msgDiag') diagnose(); });
+  $('sym').addEventListener('keydown',e=>{if(e.key==='Enter')go()});
+  $('gpair').addEventListener('keydown',e=>{if(e.key==='Enter'){S.cacheKey='';reload()}});
+  $('proxyCustom').addEventListener('keydown',e=>{if(e.key==='Enter'){S.route.clear();reload()}});
+  applyLabels();
+  stat('조회 대기','');
+  render();
+})();
+</script>
+</body>
+</html>
