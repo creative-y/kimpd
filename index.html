@@ -89,7 +89,7 @@
   </header>
 
   <div class="ctl">
-    <input type="text" id="sym" value="UB" placeholder="티커" spellcheck="false">
+    <input type="text" id="sym" value="" placeholder="티커" spellcheck="false">
     <button class="primary" id="go">조회</button>
     <div class="seg" id="mode">
       <button data-v="kimp" class="on">김프</button>
@@ -102,12 +102,12 @@
     <select id="krx">
       <option value="auto">원화: 자동탐색</option>
       <option value="bithumb">원화: 빗썸</option>
-      <option value="upbit">원화: 업비트</option>
+      <option value="upbit" selected>원화: 업비트</option>
       <option value="coinone">원화: 코인원</option>
     </select>
     <select id="ex">
       <option value="auto">해외: 자동탐색</option>
-      <option value="gate">Gate.io</option>
+      <option value="gate" selected>Gate.io</option>
       <option value="mexc">MEXC</option>
       <option value="bitget">Bitget</option>
       <option value="bybit">Bybit</option>
@@ -120,20 +120,20 @@
     <div class="seg" id="span">
       <button data-v="60">1시간</button>
       <button data-v="360">6시간</button>
-      <button data-v="1440">1일</button>
-      <button data-v="4320" class="on">3일</button>
+      <button data-v="1440" class="on">1일</button>
+      <button data-v="4320">3일</button>
       <button data-v="14400">10일</button>
     </div>
     <div class="seg" id="tf">
-      <button data-v="0" class="on">자동</button>
-      <button data-v="1">1m</button>
+      <button data-v="0">자동</button>
+      <button data-v="1" class="on">1m</button>
       <button data-v="5">5m</button>
       <button data-v="15">15m</button>
       <button data-v="60">1h</button>
     </div>
     <div class="seg" id="rf">
-      <button data-v="0">수동</button>
-      <button data-v="10" class="on">10초</button>
+      <button data-v="0" class="on">수동</button>
+      <button data-v="10">10초</button>
       <button data-v="30">30초</button>
     </div>
   </div>
@@ -187,8 +187,8 @@
   const MINMS = 60000, MAXSPAN = 14400, MINSPAN = 15;   // 15분 ~ 10일
 
   const S = {
-    sym:'UB', mode:'kimp', krx:'auto', krxUsed:'', ex:'auto', cmpA:'gate', cmpB:'mexc',
-    tfMode:0, spanMin:4320, rf:10, toFmt:{}, pairOk:{},
+    sym:'', mode:'kimp', krx:'upbit', krxUsed:'upbit', ex:'gate', cmpA:'gate', cmpB:'mexc',
+    tfMode:1, spanMin:1440, rf:0, toFmt:{}, pairOk:{},
     unit:1, series:[], cacheKey:'', K:new Map(), G:new Map(), R:new Map(),
     timer:null, debounce:null, hover:null, busy:false, started:false,
     winner:null, exName:'', route:new Map(), lastOk:0, warn:''
@@ -237,9 +237,41 @@
     return [v];
   }
   // 네트워크 계측 — 한 번의 조회가 왜 느린지 바로 보이도록
-  const NET = {req:0, prox:0, retry:0, slow:0, t0:0};
-  const netReset = () => { NET.req=0; NET.prox=0; NET.retry=0; NET.slow=0; NET.t0=performance.now(); };
+  const NET = {req:0, prox:0, retry:0, slow:0, t0:0, code:{}};
+  const netReset = () => { NET.req=0; NET.prox=0; NET.retry=0; NET.slow=0; NET.code={}; NET.t0=performance.now(); };
   const DIRECT_MS = 7000, PROXY_MS = 12000, ROUTE_TTL = 90000;
+
+  /* ── 호스트별 속도 제한 ──────────────────────────────────────
+     거래소 시세 API는 IP당 초당 요청 수를 제한한다. 모바일 회선(LTE/5G)은
+     여러 사용자가 한 공인 IP를 공유하므로 조금만 몰아쳐도 429가 쏟아지고,
+     그러면 느린 우회 경로로 떨어져 수집이 몇 분씩 걸린다.
+     → 호스트마다 동시 실행 수와 최소 간격을 두고, 429를 맞으면 스스로 느려진다. */
+  const LANES = {};
+  const lane = h => LANES[h] || (LANES[h] = {active:0, q:[], next:0, gap:140, max:3, ok:0});
+  async function slot(host){
+    const L = lane(host);
+    while(L.active >= L.max) await new Promise(r=>L.q.push(r));
+    L.active++;
+    const now = Date.now(), at = Math.max(now, L.next);
+    L.next = at + L.gap;
+    if(at > now) await sleep(at - now);
+  }
+  function release(host){
+    const L = lane(host); L.active = Math.max(0, L.active-1);
+    const n = L.q.shift(); if(n) n();
+  }
+  function slower(host, waitMs){      // 429 등 → 간격을 늘리고 동시 실행을 줄인다
+    const L = lane(host);
+    L.gap = Math.min(1200, Math.round(L.gap * 1.8));
+    L.max = Math.max(1, L.max - 1);
+    L.ok = 0;
+    if(waitMs > 0) L.next = Math.max(L.next, Date.now() + Math.min(5000, waitMs));
+  }
+  function faster(host){              // 연속 성공하면 조금씩 되돌린다
+    const L = lane(host);
+    if(L.gap <= 140 && L.max >= 3) return;
+    if(++L.ok >= 15){ L.ok = 0; L.gap = Math.max(140, Math.round(L.gap*0.7)); L.max = Math.min(3, L.max+1); }
+  }
   // 응답이 없는 요청이 전체를 붙잡지 않도록 반드시 시간 제한을 건다
   async function fetchT(u, ms){
     const c = new AbortController(), id = setTimeout(()=>c.abort(), ms);
@@ -259,25 +291,35 @@
     if(!fixed){ const w = routeGet(host); if(w!==undefined) chain=[w,...chain.filter(c=>c!==w)]; }
     let first=null, tried=0, hard=false;
     for(const p of chain){
-      const attempts = p ? 1 : 2;                 // 직접 호출만 1회 빠르게 재시도
+      // 직접 호출은 넉넉히 재시도한다. 429(요청 과다)는 잠깐 쉬면 풀리는데,
+      // 곧바로 우회로 넘어가면 몇 배 느린 경로에 갇힌다.
+      const attempts = p ? 1 : 3;
       for(let a=0; a<attempts; a++){
         const t0 = performance.now();
+        const tgt = p ? new URL(wrap(p,url)).host : host;
+        await slot(tgt);
         try{
           NET.req++; if(p) NET.prox++;
           const r = await fetchT(wrap(p,url), p ? PROXY_MS : DIRECT_MS);
-          if(!r.ok){ const e=new Error('HTTP '+r.status); e.status=r.status; throw e; }
+          if(!r.ok){ const e=new Error('HTTP '+r.status); e.status=r.status;
+                     e.wait = (+r.headers.get('retry-after') || 0) * 1000; throw e; }
           const j = await r.json();
           if(performance.now()-t0 > 2000) NET.slow++;
-          if(!fixed) S.route.set(host,{p, t:Date.now()});
+          faster(tgt);
+          // 429 때문에 우회로 넘어온 경우엔 그 경로를 기억하지 않는다 — 속도만 늦추면 직접이 다시 통한다
+          if(!fixed && !(p && first && first.status === 429)) S.route.set(host,{p, t:Date.now()});
           return j;
         }catch(err){
           if(performance.now()-t0 > 2000) NET.slow++;
-          const e = err.name==='AbortError' ? new Error('시간 초과') : err;
+          const e = err.name==='AbortError' ? Object.assign(new Error('시간 초과'),{tag:'시간초과'}) : err;
+          const tag = e.tag || (e.status ? 'HTTP '+e.status : '연결실패');
+          NET.code[tag] = (NET.code[tag]||0) + 1;
           if(!first) first = e;
+          if(e.status === 429 || e.status === 503) slower(tgt, e.wait||0);
           // 서버가 정상적으로 거부한 응답(파라미터 오류 등)은 우회해도 같다 → 즉시 중단
-          if(e.status && ![403,429,451].includes(e.status)){ hard=true; break; }
-          if(a+1 < attempts){ NET.retry++; await sleep(200); }
-        }
+          if(e.status && ![403,429,451,503].includes(e.status)){ hard=true; break; }
+          if(a+1 < attempts){ NET.retry++; await sleep(250 * Math.pow(3,a)); }
+        }finally{ release(tgt); }
       }
       if(hard) break;
       tried++;
@@ -287,10 +329,13 @@
   // 수집 상태 한 줄 — 느릴 때 원인이 우회인지, 재시도인지, 느린 응답인지 바로 보인다
   function netTx(){
     const s = ((performance.now()-NET.t0)/1000).toFixed(1);
+    const codes = Object.entries(NET.code).sort((a,b)=>b[1]-a[1]).slice(0,3)
+                        .map(([k,v])=>`${k} ${v}`).join(' · ');
     return `요청 ${NET.req}회 · ${s}초`
       + (NET.prox ? ` · 우회 ${NET.prox}회` : '')
       + (NET.retry ? ` · 재시도 ${NET.retry}회` : '')
-      + (NET.slow ? ` · 2초 초과 ${NET.slow}회` : '');
+      + (NET.slow ? ` · 2초 초과 ${NET.slow}회` : '')
+      + (codes ? `<br>실패 내역 — ${codes}` : '');
   }
   // 동시 실행 개수를 제한한 병렬 실행
   async function pool(items, n, fn){
@@ -340,11 +385,18 @@
     tag = tag || {};
     const u = B_UNITS.includes(unit)?unit:1, w = u*MINMS;
     const base = `${host}/v1/candles/minutes/${u}?market=${market}`;
-    const pages = Math.min(12, Math.max(1, Math.ceil(need/200)));
-    // 한 페이지 — to 표기 형식 후보를 순서대로 시도하고, 통한 형식을 기억한다
-    const one = async (toMs, n) => {
-      const idx = [S.toFmt[host] ?? 0, 0, 1, 2, 3, 4, 5].filter((v,i,a)=>a.indexOf(v)===i);
-      const cands = toMs==null ? [null] : idx.map(i=>({i, s:TO_FMT[i](toMs)}));
+    const pages = Math.min(24, Math.max(1, Math.ceil(need/200)));
+    // 한 페이지.
+    //   strict=true : to 로 "실제 존재하는 봉의 시각"을 준 경우. 응답이 어긋나면 시간대 오해이므로
+    //                 형식 후보를 바꿔 가며 재시도하고, 통한 형식을 기억한다.
+    //   strict=false: to 가 계산된 시각(그 분에 체결이 없을 수 있음)이라 몇 분 어긋나는 게 정상.
+    //                 이미 확정된 형식만 쓰고, "요청 구간보다 최신"인 응답만 걸러낸다.
+    const one = async (toMs, n, strict) => {
+      const known = S.toFmt[host];
+      const cands = toMs==null ? [null]
+        : (strict ? [known ?? 0, 0, 1, 2, 3, 4, 5].filter((v,i,a)=>a.indexOf(v)===i)
+                      .map(i=>({i, s:TO_FMT[i](toMs)}))
+                  : [{i:known ?? 0, s:TO_FMT[known ?? 0](toMs)}]);
       let lastErr = null;
       for(const c of cands){
         try{
@@ -352,41 +404,56 @@
           if(!Array.isArray(j)) throw new Error('무효 응답');
           if(c && !j.length){ lastErr = new Error('0건'); continue; }   // 형식 문제일 수 있으니 다음 후보
           if(c){
-            // 서버가 to를 다른 시간대로 읽으면 응답이 몇 시간씩 어긋난다 → 그 형식은 버린다
             let newest = -Infinity;
             for(const r of j){ const t = Date.parse(r.candle_date_time_utc+'Z'); if(t>newest) newest=t; }
             const drift = toMs - newest;
-            if(drift > w*3 || drift < -w){
-              lastErr = new Error(`to 해석 불일치(${Math.round(drift/60000)}분)`);
-              continue;
+            if(drift < -w){ lastErr = new Error('요청 구간보다 최신'); continue; }
+            if(strict && drift > w*3){
+              lastErr = new Error(`to 해석 불일치(${Math.round(drift/60000)}분)`); continue;
             }
           }
-          if(c) S.toFmt[host] = c.i;
+          if(c && strict) S.toFmt[host] = c.i;
           return j;
         }catch(e){ lastErr = e; }
       }
       throw lastErr || new Error('0건');
     };
-    const out = [], push = j => { for(const r of j) out.push([Date.parse(r.candle_date_time_utc+'Z'), +r.trade_price]); };
-    const anchor = beforeMs ? beforeMs-1 : null;
-    // ① 기준 페이지 — 여기서 to 형식도 확정된다
-    const head = await one(anchor, Math.min(200, Math.max(2, need)));
-    push(head);
-    if(pages > 1 && head.length >= Math.min(200, need)){
-      const end = anchor != null ? anchor : Date.now();
-      const tos = []; for(let k=1; k<pages; k++) tos.push(end - k*200*w);
-      // 형식을 아직 모르면 2페이지만 먼저 돌려 확정한 뒤 나머지를 병렬로
-      if(S.toFmt[host] == null && tos.length){
-        try{ push(await one(tos.shift(), 200)); }catch(e){ tag.v1note = `2페이지 중단(${e.message})`; }
+    const out = []; let oldest = Infinity;
+    const push = j => { for(const r of j){ const t = Date.parse(r.candle_date_time_utc+'Z');
+                        out.push([t, +r.trade_price]); if(t<oldest) oldest=t; } };
+    const anchor = beforeMs ? beforeMs-1 : null;   // 이어받기 기준점은 실제 봉에서 나온 값
+    const n0 = Math.min(200, Math.max(2, need));
+    push(await one(anchor, n0, anchor != null));
+    tag.v1 = out.length;
+
+    if(pages > 1 && out.length >= n0){
+      // 형식이 아직 미확정이면 "받아 둔 봉의 가장 오래된 시각"으로 한 번 더 받아 확정한다.
+      // 실제 봉 시각이므로 어긋남이 0에 가까워 시간대 오해를 정확히 가려낼 수 있다.
+      if(S.toFmt[host] == null){
+        try{ push(await one(oldest, 200, true)); }
+        catch(e){ tag.v1note = `형식 확인 실패(${e.message})`; }
       }
-      if(tos.length){
-        const res = await pool(tos, 4, async t => { try{ return await one(t, 200); }catch(e){ return e; } });
-        let failed = 0;
-        for(const r of res){ if(Array.isArray(r)) push(r); else failed++; }
-        if(failed) tag.v1note = `${failed}/${res.length}페이지 실패(${res.find(r=>!Array.isArray(r))?.message||''})`;
+      if(S.toFmt[host] == null){
+        // 끝내 형식을 못 정하면 병렬 대신 예전처럼 직렬로 이어받는다(안전한 폴백)
+        for(let k=2; k<pages; k++){
+          const cur = oldest;
+          try{ const j = await one(cur, 200, true); if(!j.length) break; push(j); if(oldest >= cur) break; }
+          catch(e){ tag.v1note = `${k}페이지 중단(${e.message})`; break; }
+        }
+      }else{
+        // 페이지 경계를 시각으로 미리 계산해 동시에 받는다 — 직렬이면 페이지 수만큼 왕복이 쌓인다
+        const end = anchor != null ? anchor : Date.now();
+        const tos = [];
+        for(let k=1; k<pages; k++){ const t = end - k*200*w; if(t < oldest) tos.push(t); }
+        if(tos.length){
+          const res = await pool(tos, 3, async t => { try{ return await one(t, 200, false); }catch(e){ return e; } });
+          let failed = 0, why = '';
+          for(const r of res){ if(Array.isArray(r)) push(r); else { failed++; why = why || r.message; } }
+          if(failed) tag.v1note = `${failed}/${res.length}페이지 실패(${why})`;
+        }
       }
-    }else if(head.length < Math.min(200, need)){
-      tag.v1note = `1페이지에서 소진(${head.length})`;
+    }else if(out.length < n0){
+      tag.v1note = `1페이지에서 소진(${out.length})`;
     }
     if(!out.length) throw new Error('빈 응답');
     return out;
@@ -564,6 +631,8 @@
   async function twoPhase(fetchFn, map, need, full, canPage=true){
     if(!full) return fetchFn(4, null);
     if(!map.size || !canPage) return fetchFn(need, null);
+    // 이 쪽은 이미 요청 구간을 다 채웠다 → 반대쪽이 짧다고 해서 더 과거를 긁지 않는다
+    if(map.size >= need) return fetchFn(4, null);
     const [t,bk] = await Promise.all([
       settle(fetchFn(4, null)),
       settle(fetchFn(Math.max(2, need - map.size), minKey(map)))
@@ -755,9 +824,12 @@
     if(!hardFail){
       const got = Math.min(S.K.size||0, S.G.size||0);
       // 실제로 "더 과거"에 닿았을 때만 계속 이어받는다. 더 못 가면 그 거래소 데이터의 시작점
-      const oldest = Math.min(minKey(S.G) ?? Infinity, minKey(S.K) ?? Infinity);
-      const wentBack = oldest < (S.lastOldest ?? Infinity);
-      S.lastOldest = oldest;
+      // 진전 여부는 두 계열을 각각 본다. 한쪽이 먼저 다 차면 min 값이 멈춰서
+      // 아직 채우는 중인 다른 쪽의 진전이 가려지고, 수집이 조기에 끝나 버린다.
+      const oK = minKey(S.K) ?? Infinity, oG = minKey(S.G) ?? Infinity;
+      const prev = S.lastOldest || {};
+      const wentBack = oK < (prev.K ?? Infinity) || oG < (prev.G ?? Infinity);
+      S.lastOldest = {K:oK, G:oG};
       // 더 과거로 못 가면 그게 데이터의 시작점 → 완료로 간주하고 이후엔 꼬리만 갱신
       S.fullDone = wentBack ? Math.max(S.fullDone||0, Math.min(need, got)) : need;
       S.backfilling = ((got < need*0.98 && wentBack) || (gapLeft && repaired)) && (S.bfRounds||0) < 40;
@@ -1089,7 +1161,11 @@
     S.route.clear(); reload();
   });
   function schedule(){ clearInterval(S.timer); if(S.rf>0) S.timer=setInterval(load,S.rf*1000); }
-  function go(){ S.sym=($('sym').value.trim().toUpperCase()||'BTC'); $('sym').value=S.sym;
+  function go(){
+    const v = $('sym').value.trim().toUpperCase();
+    // 기본 티커를 비워 뒀으므로, 빈 채로 누르면 조용히 BTC를 조회하지 않고 알려 준다
+    if(!v){ $('sym').focus(); say('warn','티커를 입력한 뒤 [조회]를 눌러 주세요. <span class="mute">예: SAND, ONG, KAIA</span>'); return; }
+    S.sym=v; $('sym').value=S.sym;
     S.started=true; S.winner=null; S.exSwitched=false; S.krxSwitched=false; netReset();
     if(S.krx==='auto') S.krxUsed='';
     S.cacheKey=''; S.series=[]; S.seriesKey=''; load(); schedule(); }
