@@ -236,25 +236,68 @@
     if(v==='') return [''];
     return [v];
   }
+  // 네트워크 계측 — 한 번의 조회가 왜 느린지 바로 보이도록
+  const NET = {req:0, prox:0, retry:0, slow:0, t0:0};
+  const netReset = () => { NET.req=0; NET.prox=0; NET.retry=0; NET.slow=0; NET.t0=performance.now(); };
+  const DIRECT_MS = 7000, PROXY_MS = 12000, ROUTE_TTL = 90000;
+  // 응답이 없는 요청이 전체를 붙잡지 않도록 반드시 시간 제한을 건다
+  async function fetchT(u, ms){
+    const c = new AbortController(), id = setTimeout(()=>c.abort(), ms);
+    try{ return await fetch(u, {cache:'no-store', signal:c.signal}); }
+    finally{ clearTimeout(id); }
+  }
+  function routeGet(host){
+    const r = S.route.get(host);
+    if(!r) return undefined;
+    // 직접 호출 성공은 계속 기억하지만, 우회 경로는 일정 시간 뒤 다시 직접부터 시도한다
+    if(r.p && Date.now()-r.t > ROUTE_TTL){ S.route.delete(host); return undefined; }
+    return r.p;
+  }
   async function J(url){
     const host = new URL(url).host, fixed = proxyChoice();
     let chain = fixed ? fixed : ['', ...PROXIES];
-    if(!fixed && S.route.has(host)){ const w=S.route.get(host); chain=[w,...chain.filter(c=>c!==w)]; }
-    let first=null, tried=0;
+    if(!fixed){ const w = routeGet(host); if(w!==undefined) chain=[w,...chain.filter(c=>c!==w)]; }
+    let first=null, tried=0, hard=false;
     for(const p of chain){
-      try{
-        const r = await fetch(wrap(p,url), {cache:'no-store'});
-        if(!r.ok){ const e=new Error('HTTP '+r.status); e.status=r.status; throw e; }
-        const j = await r.json();
-        if(!fixed) S.route.set(host,p);
-        return j;
-      }catch(e){
-        tried++; if(!first) first=e;
-        // 서버가 정상적으로 거부한 응답(파라미터 오류 등)은 프록시로 재시도해도 같다 → 즉시 중단
-        if(e.status && ![403,429,451].includes(e.status)) break;
+      const attempts = p ? 1 : 2;                 // 직접 호출만 1회 빠르게 재시도
+      for(let a=0; a<attempts; a++){
+        const t0 = performance.now();
+        try{
+          NET.req++; if(p) NET.prox++;
+          const r = await fetchT(wrap(p,url), p ? PROXY_MS : DIRECT_MS);
+          if(!r.ok){ const e=new Error('HTTP '+r.status); e.status=r.status; throw e; }
+          const j = await r.json();
+          if(performance.now()-t0 > 2000) NET.slow++;
+          if(!fixed) S.route.set(host,{p, t:Date.now()});
+          return j;
+        }catch(err){
+          if(performance.now()-t0 > 2000) NET.slow++;
+          const e = err.name==='AbortError' ? new Error('시간 초과') : err;
+          if(!first) first = e;
+          // 서버가 정상적으로 거부한 응답(파라미터 오류 등)은 우회해도 같다 → 즉시 중단
+          if(e.status && ![403,429,451].includes(e.status)){ hard=true; break; }
+          if(a+1 < attempts){ NET.retry++; await sleep(200); }
+        }
       }
+      if(hard) break;
+      tried++;
     }
     throw new Error((first?first.message:'fetch 실패') + (tried>1?` · 우회 ${tried-1}회도 실패`:''));
+  }
+  // 수집 상태 한 줄 — 느릴 때 원인이 우회인지, 재시도인지, 느린 응답인지 바로 보인다
+  function netTx(){
+    const s = ((performance.now()-NET.t0)/1000).toFixed(1);
+    return `요청 ${NET.req}회 · ${s}초`
+      + (NET.prox ? ` · 우회 ${NET.prox}회` : '')
+      + (NET.retry ? ` · 재시도 ${NET.retry}회` : '')
+      + (NET.slow ? ` · 2초 초과 ${NET.slow}회` : '');
+  }
+  // 동시 실행 개수를 제한한 병렬 실행
+  async function pool(items, n, fn){
+    const out = new Array(items.length); let i = 0;
+    const work = async () => { while(i < items.length){ const k = i++; out[k] = await fn(items[k], k); } };
+    await Promise.all(Array.from({length: Math.min(n, items.length)}, work));
+    return out;
   }
 
   /* ---------- 빗썸 (페이지네이션) ---------- */
@@ -291,19 +334,18 @@
       ? `  ·  USD 마켓 사용(USDT≈USD로 간주)` : '';
   }
 
+  // 페이지 경계를 "시각"으로 미리 계산해 동시에 받는다. 직렬로 이어받으면 페이지 수만큼
+  // 왕복이 쌓여 1일치(8페이지)에도 수십 초가 걸린다.
   async function candlesV1(host, market, unit, need, tag, beforeMs){
     tag = tag || {};
-    const u = B_UNITS.includes(unit)?unit:1;
-    const maxPage = Math.min(12, Math.ceil(need/200)+1);
+    const u = B_UNITS.includes(unit)?unit:1, w = u*MINMS;
     const base = `${host}/v1/candles/minutes/${u}?market=${market}`;
-    const out=[]; let toMs = beforeMs ? beforeMs-1 : null, guard=0, firstErr=null;
-    while(out.length < need && guard++ < maxPage){
-      if(guard>1) await sleep(60);
-      const n = Math.min(200, need-out.length);
-      // 1페이지는 to 없이, 이후는 형식 후보를 순서대로(직전 성공 형식 우선)
+    const pages = Math.min(12, Math.max(1, Math.ceil(need/200)));
+    // 한 페이지 — to 표기 형식 후보를 순서대로 시도하고, 통한 형식을 기억한다
+    const one = async (toMs, n) => {
       const idx = [S.toFmt[host] ?? 0, 0, 1, 2, 3, 4, 5].filter((v,i,a)=>a.indexOf(v)===i);
       const cands = toMs==null ? [null] : idx.map(i=>({i, s:TO_FMT[i](toMs)}));
-      let rows=null, lastErr=null;
+      let lastErr = null;
       for(const c of cands){
         try{
           const j = await J(base + `&count=${n}` + (c?`&to=${encodeURIComponent(c.s)}`:''));
@@ -314,25 +356,39 @@
             let newest = -Infinity;
             for(const r of j){ const t = Date.parse(r.candle_date_time_utc+'Z'); if(t>newest) newest=t; }
             const drift = toMs - newest;
-            if(drift > u*MINMS*3 || drift < -u*MINMS){
+            if(drift > w*3 || drift < -w){
               lastErr = new Error(`to 해석 불일치(${Math.round(drift/60000)}분)`);
               continue;
             }
           }
-          rows = j; if(c) S.toFmt[host] = c.i;
-          break;
+          if(c) S.toFmt[host] = c.i;
+          return j;
         }catch(e){ lastErr = e; }
       }
-      if(!rows || !rows.length){
-        if(guard>1) tag.v1note = `${guard}페이지 중단(${lastErr?lastErr.message:'0건'})`;
-        if(!firstErr) firstErr = lastErr;
-        break;
+      throw lastErr || new Error('0건');
+    };
+    const out = [], push = j => { for(const r of j) out.push([Date.parse(r.candle_date_time_utc+'Z'), +r.trade_price]); };
+    const anchor = beforeMs ? beforeMs-1 : null;
+    // ① 기준 페이지 — 여기서 to 형식도 확정된다
+    const head = await one(anchor, Math.min(200, Math.max(2, need)));
+    push(head);
+    if(pages > 1 && head.length >= Math.min(200, need)){
+      const end = anchor != null ? anchor : Date.now();
+      const tos = []; for(let k=1; k<pages; k++) tos.push(end - k*200*w);
+      // 형식을 아직 모르면 2페이지만 먼저 돌려 확정한 뒤 나머지를 병렬로
+      if(S.toFmt[host] == null && tos.length){
+        try{ push(await one(tos.shift(), 200)); }catch(e){ tag.v1note = `2페이지 중단(${e.message})`; }
       }
-      for(const r of rows) out.push([Date.parse(r.candle_date_time_utc+'Z'), +r.trade_price]);
-      toMs = Date.parse(rows[rows.length-1].candle_date_time_utc+'Z');
-      if(rows.length < n){ tag.v1note = `${guard}페이지에서 소진(${rows.length}/${n})`; break; }
+      if(tos.length){
+        const res = await pool(tos, 4, async t => { try{ return await one(t, 200); }catch(e){ return e; } });
+        let failed = 0;
+        for(const r of res){ if(Array.isArray(r)) push(r); else failed++; }
+        if(failed) tag.v1note = `${failed}/${res.length}페이지 실패(${res.find(r=>!Array.isArray(r))?.message||''})`;
+      }
+    }else if(head.length < Math.min(200, need)){
+      tag.v1note = `1페이지에서 소진(${head.length})`;
     }
-    if(!out.length) throw (firstErr || new Error('빈 응답'));
+    if(!out.length) throw new Error('빈 응답');
     return out;
   }
   // 코인원 v2 차트 — 한 번에 최대 500봉, 페이지네이션 없음
@@ -486,9 +542,9 @@
       throw lastErr || new Error('빈 응답');
     };
     const out=[]; let end = beforeMs ? beforeMs-1 : null, guard=0;
-    const maxPage = e.noPage ? 1 : Math.min(2, Math.ceil(need/e.max)+ (beforeMs?0:1));
+    const maxPage = e.noPage ? 1 : Math.min(3, Math.ceil(need/e.max)+ (beforeMs?0:1));
     while(out.length < need && guard++ < maxPage){
-      if(guard>1) await sleep(250);
+      if(guard>1) await sleep(120);
       const n = Math.min(e.max, Math.max(2, need-out.length));
       let rows=null, lastErr=null;
       try{ rows = await fetchPage(n, end); }catch(err){ lastErr = err; }
@@ -614,7 +670,7 @@
     // 해상도/기간이 바뀌면 버킷 캐시만 비우고, 화면의 직전 시리즈는 새 데이터가 올 때까지 유지
     if(key !== S.cacheKey){ S.cacheKey=key; S.K.clear(); S.G.clear(); S.R.clear();
       S.unit=unit; S.fullDone=0; S.backfilling=false; S.lastOldest=null; S.bfRounds=0;
-      S.repairTried=new Set(); }
+      S.repairTried=new Set(); netReset(); }
     const wasBackfilling = !!S.backfilling;
     const need = Math.ceil(S.spanMin/unit) + 4;
     const full = need > (S.fullDone||0);             // 처음이거나 줌아웃 → 전체, 아니면 꼬리만
@@ -639,10 +695,13 @@
       const prevKrx = S.krxUsed;
       // settle을 즉시 붙여야 await 중 거절이 unhandled로 새지 않는다
       const exP = settle(overseas(S.sym, unit, n, log, full));
-      // 코인이 어느 원화거래소에서 잡히는지 먼저 확정한 뒤, 같은 거래소에서 환율을 가져온다
-      krR = await settle(krwCandles(S.sym, unit, n, tagK, S.K, full));
       const prevFx = S.fxUsed;
-      [exR, fxR] = await Promise.all([exP, settle(fxCandles(unit, n, tagR, full))]);
+      // 어느 원화거래소를 쓸지 이미 아는 경우(고정했거나 직전에 찾은 경우)에는 환율도 동시에 받는다.
+      // 모를 때만 코인 쪽을 먼저 확정한 뒤 같은 거래소에서 환율을 가져온다.
+      let fxP = (S.krx !== 'auto' || S.krxUsed) ? settle(fxCandles(unit, n, tagR, full)) : null;
+      krR = await settle(krwCandles(S.sym, unit, n, tagK, S.K, full));
+      if(!fxP) fxP = settle(fxCandles(unit, n, tagR, full));
+      [exR, fxR] = await Promise.all([exP, fxP]);
       if(S.fxUsed !== prevFx) S.R.clear();            // 환율 출처가 바뀌면 환율 캐시는 버림
       if(S.krxUsed !== prevKrx){ S.K.clear(); S.R.clear(); }   // 원화거래소가 바뀌면 캐시 초기화
       if(S.winner !== prevWinner) S.G.clear();        // 해외 거래소가 바뀌면 해외 캐시는 버림
@@ -788,7 +847,7 @@
       setTimeout(load, [1500,3000,5000][S.retryN-1]);
     }
     // 과거 구간이 아직 덜 찼고 직전 라운드에서 진전이 있었으면 이어서 채운다 (상한 30회)
-    if(S.backfilling && S.series.length && fresh){ S.bfRounds=(S.bfRounds||0)+1; setTimeout(load, 1200); }
+    if(S.backfilling && S.series.length && fresh){ S.bfRounds=(S.bfRounds||0)+1; setTimeout(load, 400); }
   }
 
   /* ---------- chart ---------- */
@@ -810,7 +869,8 @@
       const short = cover < S.spanMin*0.9;
       $('zoomHint').innerHTML = `${spanTx(S.spanMin)} · ${S.unit}m · 휠로 기간 조절`
         + (short ? `   (보유 데이터 ${spanTx(Math.max(1,cover))})` : '')
-        + `<br><span style="opacity:.65">데이터 시작 — ${nameTarget()} ${stamp(minKey(S.K) ?? d[0].t)} · ${nameBase()} ${stamp(minKey(S.G) ?? d[0].t)}${usdNote()}</span>`;
+        + `<br><span style="opacity:.65">데이터 시작 — ${nameTarget()} ${stamp(minKey(S.K) ?? d[0].t)} · ${nameBase()} ${stamp(minKey(S.G) ?? d[0].t)}${usdNote()}</span>`
+        + `<br><span style="opacity:.5">수집 ${netTx()}</span>`;
     }else $('zoomHint').innerHTML = '휠 스크롤로 기간 조절';
     if(!d.length){ ctx.fillStyle=C('--tx3'); ctx.font='13px system-ui'; ctx.textAlign='center';
       ctx.fillText(S.started ? '데이터 없음' : '티커를 입력하고 [조회]를 누르세요', W/2, H/2);
@@ -1030,7 +1090,7 @@
   });
   function schedule(){ clearInterval(S.timer); if(S.rf>0) S.timer=setInterval(load,S.rf*1000); }
   function go(){ S.sym=($('sym').value.trim().toUpperCase()||'BTC'); $('sym').value=S.sym;
-    S.started=true; S.winner=null; S.exSwitched=false; S.krxSwitched=false;
+    S.started=true; S.winner=null; S.exSwitched=false; S.krxSwitched=false; netReset();
     if(S.krx==='auto') S.krxUsed='';
     S.cacheKey=''; S.series=[]; S.seriesKey=''; load(); schedule(); }
   $('go').addEventListener('click',go);
