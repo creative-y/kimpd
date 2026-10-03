@@ -188,6 +188,7 @@
 
   const S = {
     sym:'', mode:'kimp', krx:'upbit', krxUsed:'upbit', ex:'gate', cmpA:'gate', cmpB:'mexc',
+    krxPick:'', exPick:'', krxWhy:'', exWhy:'',
     tfMode:1, spanMin:1440, rf:0, toFmt:{}, pairOk:{},
     unit:1, series:[], cacheKey:'', K:new Map(), G:new Map(), R:new Map(),
     timer:null, debounce:null, hover:null, busy:false, started:false,
@@ -492,12 +493,12 @@
     if(!out.length) throw new Error(tag.v1err || tag.lgerr || `${ex.name} 조회 실패`);
     return out;
   }
-  // 자동탐색이면 상장돼 있는 원화거래소를 찾아 채택
+  // 거래소를 직접 고른 경우에도, 그 거래소가 막히면 이번 조회에 한해 다른 곳에서 받아 온다.
+  // 선택값(S.krx)과 화면의 선택 상자는 절대 바꾸지 않는다 — [조회]를 다시 누르면 고른 곳부터 시도한다.
   async function krwCandles(coin, unit, need, tag, map, full){
     tag = tag || {};
-    const list = S.krx==='auto'
-      ? (S.krxUsed ? [S.krxUsed, ...KRX_ORDER.filter(k=>k!==S.krxUsed)] : KRX_ORDER)
-      : [S.krx];
+    const first = S.krxPick || (S.krx==='auto' ? (S.krxUsed || KRX_ORDER[0]) : S.krx);
+    const list = [first, ...KRX_ORDER.filter(k=>k!==first)];
     let lastErr;
     for(const k of list){
       const t = {};
@@ -506,7 +507,10 @@
           ? await twoPhase((n,before)=>krwCandlesOn(k, coin, unit, n, t, before),
                            map, need, full, KRW_EX[k].kind !== 'coinone')
           : await krwCandlesOn(k, coin, unit, need, t);
-        Object.assign(tag, t); S.krxUsed = k;
+        Object.assign(tag, t); S.krxUsed = k; S.krxPick = k;
+        // 고른 거래소가 아닌 곳에서 받았으면 사유를 남겨 화면에 알린다
+        S.krxWhy = (S.krx !== 'auto' && k !== S.krx)
+          ? (lastErr ? lastErr.message : '조회 실패') : '';
         return rows;
       }catch(e){ lastErr = e; tag[KRW_EX[k].name] = e.message; }
     }
@@ -514,7 +518,8 @@
   }
   // USDT/KRW는 거래소마다 사실상 같은 값 → 코인이 잡힌 곳부터 시도하고, 막히면 다른 곳에서 받는다
   async function fxCandles(unit, need, tag, full){
-    const first = S.krxUsed || (S.krx==='auto' ? 'bithumb' : S.krx);
+    // 고정한 거래소가 있으면 환율도 거기부터 — 직전 조회에서 대체됐더라도 다시 시도한다
+    const first = S.krxPick || (S.krx!=='auto' ? S.krx : (S.krxUsed || KRX_ORDER[0]));
     const order = [first, ...KRX_ORDER.filter(k=>k!==first)];
     let lastErr;
     for(const k of order){
@@ -526,6 +531,19 @@
       }catch(e){ lastErr = e; }
     }
     throw lastErr || new Error('USDT/KRW 조회 실패');
+  }
+  // 고른 거래소 대신 다른 곳에서 받아 왔을 때 그 사실을 분명히 알린다
+  function swapTx(){
+    if(S.mode==='cmp') return '';
+    const out = [];
+    if(S.krx!=='auto' && S.krxUsed && S.krxUsed!==S.krx)
+      out.push(`원화는 <b>${KRW_EX[S.krx].name}</b>가 아니라 <b>${KRW_EX[S.krxUsed].name}</b> 데이터입니다.`
+             + (S.krxWhy?` <span class="mute">(${S.krxWhy})</span>`:''));
+    if(S.ex!=='auto' && S.winner && S.winner!==S.ex)
+      out.push(`해외는 <b>${EX[S.ex].name}</b>가 아니라 <b>${EX[S.winner].name}</b> 데이터입니다.`
+             + (S.exWhy?` <span class="mute">(${S.exWhy})</span>`:''));
+    return out.length ? out.join('<br>')
+      + '<br><span class="mute">선택은 그대로입니다 — [조회]를 다시 누르면 고른 거래소부터 시도합니다.</span>' : '';
   }
   const tagTx = t => [t.v1!=null?`v1 ${t.v1}`:null, t.v1note||null, t.lg!=null?`구API ${t.lg}`:null,
                       t.v1err?`v1 실패(${t.v1err})`:null, t.lgerr?`구API 실패(${t.lgerr})`:null]
@@ -643,7 +661,8 @@
   }
   // full 조회일 때 자동탐색이면, 히스토리가 너무 짧으면 다른 거래소도 확인해 더 긴 쪽을 채택
   async function overseas(sym, unit, need, log, full){
-    const list = S.ex==='auto' ? (S.winner?[S.winner,...ORDER.filter(k=>k!==S.winner)]:ORDER) : [S.ex];
+    const head = S.exPick || (S.ex==='auto' ? (S.winner || ORDER[0]) : S.ex);
+    const list = [head, ...ORDER.filter(k=>k!==head)];
     let best=null, bestKey=null, ok=0, lastErr;
     for(const k of list){
       try{
@@ -656,7 +675,9 @@
       }catch(e){ lastErr=e; log.push([EX[k].name,false,e.message]); }
     }
     if(!best) throw new Error(lastErr?lastErr.message:'해외 거래소 조회 실패');
-    S.winner = bestKey; S.exName = EX[bestKey].name;
+    S.winner = bestKey; S.exName = EX[bestKey].name; S.exPick = bestKey;
+    S.exWhy = (S.ex !== 'auto' && bestKey !== S.ex)
+      ? (lastErr ? lastErr.message : '조회 실패') : '';
     return best;
   }
 
@@ -852,6 +873,7 @@
         say('warn', `갱신 실패 — 직전 데이터를 유지합니다. <span class="mute">${hard.map(([n2,r])=>n2+': '+r.reason.message).join(' / ')}</span>`);
         stat(`${pairTx} · ${spanTx(S.spanMin)} · ${unit}m · 갱신실패`,' warn');
       }else{
+        const swap = swapTx();
         const cov = (S.series[S.series.length-1].t - S.series[0].t)/MINMS;
         if(cov < S.spanMin*0.8){                       // 요청 기간보다 데이터가 짧음
           const kS=minKey(S.K), gS=minKey(S.G), late = gS>kS+unit*MINMS*2;
@@ -861,7 +883,10 @@
             + (S.mode!=='cmp' && S.krxUsed==='coinone' && need>500
                 ? `<br><b>코인원은 한 번에 500봉까지만 제공하고 과거 조회가 없습니다</b>(${unit}m 기준 ${spanTx(500*unit)}).`
                   + ` 이 기간 전체를 보려면 해상도를 <code>${unit<5?'5m':unit<15?'15m':'1h'}</code> 이상으로 올리거나 <b>자동</b>으로 두세요.`
-                : (late ? `<br>${nameBase()}의 <b>${S.sym}</b> 데이터가 그 이전엔 없습니다. 다른 거래소로 바꾸면 더 긴 구간이 나올 수 있어요.` : '')));
+                : (late ? `<br>${nameBase()}의 <b>${S.sym}</b> 데이터가 그 이전엔 없습니다. 다른 거래소로 바꾸면 더 긴 구간이 나올 수 있어요.` : ''))
+            + (swap ? `<br><br>${swap}` : ''));
+        }else if(swap){
+          say('warn', swap);
         }else{
           say(stale ? 'warn' : '', stale ? '최근 봉이 갱신되지 않고 있습니다. 거래가 없거나 응답이 지연되는 중일 수 있어요.' : '');
         }
@@ -874,26 +899,6 @@
       stat('재시도 중…',' warn');
       say('warn', `응답이 없어 다시 시도하는 중입니다… <span class="mute">${
         log.filter(([,ok])=>!ok).map(f=>f[0]+': '+f[2]).join(' / ')}</span>`);
-    }else if(S.mode!=='cmp' && S.krx!=='auto' && krR.status==='rejected' && !S.krxSwitched){
-      // 고정한 원화거래소가 재시도 끝에도 실패하면(차단·미상장 모두) 자동탐색으로 넘어간다
-      const failName = KRW_EX[S.krx]?.name || S.krx;
-      const why = krR.reason?.message || '';
-      S.krxSwitched = true; S.krx = 'auto'; $('krx').value = 'auto';
-      S.krxUsed = ''; S.fxUsed = ''; S.K.clear(); S.R.clear();
-      S.cacheKey = ''; S.retryN = 0;
-      applyLabels();
-      stat('원화거래소 자동탐색으로 전환',' warn');
-      say('warn', `<b>${failName}</b>에서 <b>${S.sym}</b>를 받지 못해 <b>자동탐색</b>으로 전환했습니다.`
-        + ` 상장돼 있는 원화거래소를 찾는 중입니다…${why?` <span class="mute">(${why})</span>`:''}`);
-      render(); S.busy=false; setTimeout(load, 300); return;
-    }else if(S.mode!=='cmp' && S.ex!=='auto' && exR.status==='rejected' && !S.exSwitched){
-      // 고정한 해외 거래소가 재시도 끝에도 막히면 자동탐색으로 넘어간다
-      const blockedName = EX[S.ex]?.name || S.ex;
-      S.exSwitched = true; S.ex = 'auto'; $('ex').value = 'auto';
-      S.winner = null; S.cacheKey = ''; S.retryN = 0;
-      stat('자동탐색으로 전환','warn');
-      say('warn', `<b>${blockedName}</b>가 계속 차단되어 <b>자동탐색</b>으로 전환했습니다. 되는 거래소를 찾는 중입니다…`);
-      render(); S.busy=false; setTimeout(load, 300); return;
     }else{
       stat('오류',' bad');
       const rows = log.map(([n2,ok,d])=>`<tr><td>${n2}</td><td class="${ok?'ok':'no'}">${ok?'성공':'실패'}</td><td>${d}</td></tr>`).join('');
@@ -1134,7 +1139,7 @@
                    applyLabels(); render(); reload(); });
   $('krx').addEventListener('change',e=>{
     S.krx=e.target.value; S.krxUsed = e.target.value==='auto' ? '' : e.target.value;
-    S.krxSwitched=false; S.fxUsed=''; S.K.clear(); S.R.clear();
+    S.krxPick=''; S.krxWhy=''; S.fxUsed=''; S.K.clear(); S.R.clear();
     S.cacheKey=''; S.series=[]; S.seriesKey=''; S.srcTx='';
     applyLabels(); reload();
   });
@@ -1153,7 +1158,7 @@
     });
   }
   $('ex').addEventListener('change',e=>{
-    S.ex=e.target.value; S.exSwitched=false;      // 사용자가 직접 고르면 자동전환 기록 초기화
+    S.ex=e.target.value; S.exPick=''; S.exWhy='';   // 사용자가 직접 고르면 대체 기록 초기화
     S.winner=null; S.cacheKey=''; S.series=[]; S.seriesKey=''; reload();
   });
   $('proxy').addEventListener('change',e=>{
@@ -1166,8 +1171,9 @@
     // 기본 티커를 비워 뒀으므로, 빈 채로 누르면 조용히 BTC를 조회하지 않고 알려 준다
     if(!v){ $('sym').focus(); say('warn','티커를 입력한 뒤 [조회]를 눌러 주세요. <span class="mute">예: SAND, ONG, KAIA</span>'); return; }
     S.sym=v; $('sym').value=S.sym;
-    S.started=true; S.winner=null; S.exSwitched=false; S.krxSwitched=false; netReset();
-    if(S.krx==='auto') S.krxUsed='';
+    // [조회]를 누를 때마다 사용자가 고른 거래소부터 다시 시도한다
+    S.started=true; S.winner=null; S.exPick=''; S.krxPick=''; S.exWhy=''; S.krxWhy=''; netReset();
+    S.krxUsed = S.krx==='auto' ? '' : S.krx;
     S.cacheKey=''; S.series=[]; S.seriesKey=''; load(); schedule(); }
   $('go').addEventListener('click',go);
   $('diag').addEventListener('click',diagnose);
