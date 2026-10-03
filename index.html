@@ -248,7 +248,8 @@
      그러면 느린 우회 경로로 떨어져 수집이 몇 분씩 걸린다.
      → 호스트마다 동시 실행 수와 최소 간격을 두고, 429를 맞으면 스스로 느려진다. */
   const LANES = {};
-  const lane = h => LANES[h] || (LANES[h] = {active:0, q:[], next:0, gap:140, max:3, ok:0});
+  const GAP0 = 200, MAX0 = 2;     // 기본: 호스트당 동시 2건, 최소 간격 0.2초(≈초당 5건)
+  const lane = h => LANES[h] || (LANES[h] = {active:0, q:[], next:0, gap:GAP0, max:MAX0, ok:0});
   async function slot(host){
     const L = lane(host);
     while(L.active >= L.max) await new Promise(r=>L.q.push(r));
@@ -263,15 +264,15 @@
   }
   function slower(host, waitMs){      // 429 등 → 간격을 늘리고 동시 실행을 줄인다
     const L = lane(host);
-    L.gap = Math.min(1200, Math.round(L.gap * 1.8));
+    L.gap = Math.min(1500, Math.round(L.gap * 1.8));
     L.max = Math.max(1, L.max - 1);
     L.ok = 0;
     if(waitMs > 0) L.next = Math.max(L.next, Date.now() + Math.min(5000, waitMs));
   }
   function faster(host){              // 연속 성공하면 조금씩 되돌린다
     const L = lane(host);
-    if(L.gap <= 140 && L.max >= 3) return;
-    if(++L.ok >= 15){ L.ok = 0; L.gap = Math.max(140, Math.round(L.gap*0.7)); L.max = Math.min(3, L.max+1); }
+    if(L.gap <= GAP0 && L.max >= MAX0) return;
+    if(++L.ok >= 15){ L.ok = 0; L.gap = Math.max(GAP0, Math.round(L.gap*0.7)); L.max = Math.min(MAX0, L.max+1); }
   }
   // 응답이 없는 요청이 전체를 붙잡지 않도록 반드시 시간 제한을 건다
   async function fetchT(u, ms){
@@ -286,16 +287,26 @@
     if(r.p && Date.now()-r.t > ROUTE_TTL){ S.route.delete(host); return undefined; }
     return r.p;
   }
+  /* 호스트 건강 기록.
+     브라우저는 CORS 헤더가 없는 응답을 상태 코드 없이 "연결 실패"로만 보여 준다.
+     거래소가 레이트리밋으로 429를 돌려줄 때 CORS 헤더를 빼먹으면 우리는 429인지조차 모른다.
+     → 이번 세션에 이미 한 번이라도 성공한 호스트에서 갑자기 연결 실패가 나면
+       "차단"이 아니라 "혼잡"으로 보고, 느려져서 직접 다시 시도한다. 느린 우회로는 가지 않는다. */
+  const HOST = {};
+  const health = h => HOST[h] || (HOST[h] = {ok:0, fail:0});
   async function J(url){
-    const host = new URL(url).host, fixed = proxyChoice();
-    let chain = fixed ? fixed : ['', ...PROXIES];
-    if(!fixed){ const w = routeGet(host); if(w!==undefined) chain=[w,...chain.filter(c=>c!==w)]; }
+    const host = new URL(url).host, fixed = proxyChoice(), H = health(host);
+    const known = H.ok > 0;                       // 이 세션에서 직접 호출이 통한 적 있음
+    let chain;
+    if(fixed) chain = fixed;
+    else if(known && H.fail < 8) chain = [''];    // 통하던 곳 → 우회하지 않고 직접만
+    else chain = ['', ...PROXIES];
+    if(!fixed && chain.length > 1){ const w = routeGet(host); if(w!==undefined) chain=[w,...chain.filter(c=>c!==w)]; }
     let first=null, tried=0, hard=false;
     for(const p of chain){
-      // 직접 호출은 넉넉히 재시도한다. 429(요청 과다)는 잠깐 쉬면 풀리는데,
-      // 곧바로 우회로 넘어가면 몇 배 느린 경로에 갇힌다.
-      const attempts = p ? 1 : 3;
-      for(let a=0; a<attempts; a++){
+      // 직접 호출: 통하던 곳이면 넉넉히 기다리며 4회, 처음 보는 곳이면 2회 후 우회
+      const waits = p ? [] : (known ? [600, 1500, 3500] : [300]);
+      for(let a=0; a<=waits.length; a++){
         const t0 = performance.now();
         const tgt = p ? new URL(wrap(p,url)).host : host;
         await slot(tgt);
@@ -307,19 +318,24 @@
           const j = await r.json();
           if(performance.now()-t0 > 2000) NET.slow++;
           faster(tgt);
-          // 429 때문에 우회로 넘어온 경우엔 그 경로를 기억하지 않는다 — 속도만 늦추면 직접이 다시 통한다
-          if(!fixed && !(p && first && first.status === 429)) S.route.set(host,{p, t:Date.now()});
+          if(!p){ H.ok++; H.fail = 0; }
+          // 혼잡 때문에 우회로 넘어온 경우엔 그 경로를 기억하지 않는다
+          if(!fixed && !(p && first && (first.status === 429 || first.soft)))
+            S.route.set(host,{p, t:Date.now()});
           return j;
         }catch(err){
           if(performance.now()-t0 > 2000) NET.slow++;
           const e = err.name==='AbortError' ? Object.assign(new Error('시간 초과'),{tag:'시간초과'}) : err;
           const tag = e.tag || (e.status ? 'HTTP '+e.status : '연결실패');
           NET.code[tag] = (NET.code[tag]||0) + 1;
+          if(!p) H.fail++;
+          // 혼잡 신호: 429·503, 또는 통하던 곳의 상태 코드 없는 실패/시간 초과
+          const soft = e.status === 429 || e.status === 503 || (!p && known && !e.status);
+          if(soft){ e.soft = true; slower(tgt, e.wait||0); }
           if(!first) first = e;
-          if(e.status === 429 || e.status === 503) slower(tgt, e.wait||0);
-          // 서버가 정상적으로 거부한 응답(파라미터 오류 등)은 우회해도 같다 → 즉시 중단
+          // 서버가 정상적으로 거부한 응답(파라미터 오류 등)은 다시 해도 같다 → 즉시 중단
           if(e.status && ![403,429,451,503].includes(e.status)){ hard=true; break; }
-          if(a+1 < attempts){ NET.retry++; await sleep(250 * Math.pow(3,a)); }
+          if(a < waits.length){ NET.retry++; await sleep(Math.max(waits[a], e.wait||0)); }
         }finally{ release(tgt); }
       }
       if(hard) break;
@@ -647,12 +663,17 @@
 
   // 최신 꼬리 + 과거 이어받기를 한 번에. 한쪽이 실패해도 다른 쪽은 살린다
   async function twoPhase(fetchFn, map, need, full, canPage=true){
-    if(!full) return fetchFn(4, null);
+    // 꼬리 = 가장 최근 봉 이후 비어 있는 만큼(최소 4봉, 최대 1000봉).
+    // 보관본을 되살린 뒤나 한참 만에 [조회]해도 처음부터 다시 받지 않고 빈 곳만 채운다.
+    const mk = maxKey(map);
+    const tail = mk==null ? 4
+      : Math.max(4, Math.min(1000, Math.ceil((Date.now()-mk)/(S.unit*MINMS)) + 2));
+    if(!full) return fetchFn(tail, null);
     if(!map.size || !canPage) return fetchFn(need, null);
     // 이 쪽은 이미 요청 구간을 다 채웠다 → 반대쪽이 짧다고 해서 더 과거를 긁지 않는다
-    if(map.size >= need) return fetchFn(4, null);
+    if(map.size >= need) return fetchFn(tail, null);
     const [t,bk] = await Promise.all([
-      settle(fetchFn(4, null)),
+      settle(fetchFn(tail, null)),
       settle(fetchFn(Math.max(2, need - map.size), minKey(map)))
     ]);
     const rows = [...(t.value||[]), ...(bk.value||[])];
@@ -727,7 +748,64 @@
         out.push({t, prem:(kv-th)/th*100, krw:kv, usdt:gv, fx:f, th});
       }
     }
-    if(out.length){ S.series = out; S.seriesKey = S.cacheKey; }
+    if(out.length){ S.series = out; S.seriesKey = S.cacheKey; saveSnap(); }
+  }
+
+  /* ---------- 직전 결과 보관 (브라우저가 탭을 버려도 화면이 남도록) ----------
+     모바일 크롬은 다른 앱을 쓰는 동안 배경 탭을 통째로 폐기한다. 돌아오면 페이지가
+     처음부터 다시 열려 메모리에 있던 봉이 전부 사라진다 → 저장해 두고 되살린다. */
+  const SKEY = 'kimp.snap.v1', SNAP_TTL = 12*3600000, SNAP_MAX = 12000;
+  const stateKey = () => S.mode==='cmp'
+    ? `cmp|${S.sym}|${S.cmpA}|${S.cmpB}` : `${S.sym}|${S.krx}|${S.ex}`;
+  let saveT = null;
+  function saveSnap(){
+    clearTimeout(saveT);
+    saveT = setTimeout(()=>{
+      try{
+        if(!S.started || !S.series.length) return;
+        const cut = m => { const e=[...m.entries()];
+          return (e.length>SNAP_MAX ? e.slice(-SNAP_MAX) : e).map(([b,v])=>[b,v[0],v[1]]); };
+        localStorage.setItem(SKEY, JSON.stringify({
+          v:1, t:Date.now(), key:stateKey(), unit:S.unit,
+          sym:S.sym, mode:S.mode, krx:S.krx, ex:S.ex, cmpA:S.cmpA, cmpB:S.cmpB,
+          tfMode:S.tfMode, spanMin:S.spanMin, rf:S.rf,
+          krxUsed:S.krxUsed, fxUsed:S.fxUsed, winner:S.winner, exName:S.exName,
+          krxWhy:S.krxWhy, exWhy:S.exWhy, srcTx:S.srcTx,
+          toFmt:S.toFmt, pairOk:S.pairOk, fullDone:S.fullDone, rUnit:S.rUnit,
+          K:cut(S.K), G:cut(S.G), R:cut(S.R)
+        }));
+      }catch(e){ try{ localStorage.removeItem(SKEY); }catch(_){} }   // 용량 초과 등은 조용히 포기
+    }, 600);
+  }
+  function loadSnap(){
+    let d; try{ d = JSON.parse(localStorage.getItem(SKEY)||'null'); }catch(e){ return false; }
+    if(!d || d.v!==1 || !d.K || Date.now()-d.t > SNAP_TTL) return false;
+    try{
+      const put = (m,a) => { m.clear(); for(const [b,t,c] of a) m.set(b,[t,c]); };
+      Object.assign(S, {sym:d.sym, mode:d.mode, krx:d.krx, ex:d.ex, cmpA:d.cmpA, cmpB:d.cmpB,
+        tfMode:d.tfMode, spanMin:d.spanMin, rf:d.rf, unit:d.unit,
+        krxUsed:d.krxUsed, fxUsed:d.fxUsed, winner:d.winner, exName:d.exName||'',
+        krxWhy:d.krxWhy||'', exWhy:d.exWhy||'', srcTx:d.srcTx||'',
+        toFmt:d.toFmt||{}, pairOk:d.pairOk||{}, fullDone:d.fullDone||0, rUnit:d.rUnit});
+      put(S.K,d.K); put(S.G,d.G); put(S.R,d.R);
+      $('sym').value = S.sym;
+      $('krx').value = S.krx; $('ex').value = S.ex;
+      $('exA').value = S.cmpA; $('exB').value = S.cmpB;
+      for(const [id,v] of [['span',S.spanMin],['tf',S.tfMode],['rf',S.rf],['mode',S.mode]])
+        for(const btn of $(id).querySelectorAll('button'))
+          btn.classList.toggle('on', btn.dataset.v == v);
+      S.started = true;
+      S.cacheKey = S.mode==='cmp'
+        ? `cmp|${S.sym}|${S.cmpA}|${S.cmpB}|${S.unit}|` : `${S.sym}|${S.krx}|${S.ex}|${S.unit}|`;
+      rebuild();
+      if(!S.series.length) return false;
+      applyLabels();
+      const mins = Math.round((Date.now()-d.t)/60000);
+      stat(`${S.mode==='cmp'?`${nameBase()}→${nameTarget()}`:S.exName} · ${spanTx(S.spanMin)} · ${S.unit}m · ${S.series.length}봉 · 보관본`,' warn');
+      say('warn', `<b>${mins<1?'방금':mins<60?mins+'분 전':Math.round(mins/60)+'시간 전'}</b> 조회 결과를 그대로 띄웠습니다. `
+                + `최신으로 맞추려면 <b>[조회]</b>를 누르세요.`);
+      return true;
+    }catch(e){ return false; }
   }
 
   /* ---------- 해상도 ---------- */
@@ -758,7 +836,9 @@
       ? `cmp|${S.sym}|${S.cmpA}|${S.cmpB}|${unit}|${$('gpair').value.trim()}`
       : `${S.sym}|${S.krx}|${S.ex}|${unit}|${$('gpair').value.trim()}`;
     // 해상도/기간이 바뀌면 버킷 캐시만 비우고, 화면의 직전 시리즈는 새 데이터가 올 때까지 유지
-    if(key !== S.cacheKey){ S.cacheKey=key; S.K.clear(); S.G.clear(); S.R.clear();
+    if(key !== S.cacheKey){
+      const keepR = S.mode!=='cmp' && S.R.size && S.rUnit===unit && S.krx!=='auto' && S.fxUsed===S.krx;
+      S.cacheKey=key; S.K.clear(); S.G.clear(); if(!keepR) S.R.clear();
       S.unit=unit; S.fullDone=0; S.backfilling=false; S.lastOldest=null; S.bfRounds=0;
       S.repairTried=new Set(); netReset(); }
     const wasBackfilling = !!S.backfilling;
@@ -806,7 +886,7 @@
 
     if(krR.status==='fulfilled') merge(S.K, krR.value, unit);
     if(exR.status==='fulfilled') merge(S.G, exR.value, unit);
-    if(fxR.status==='fulfilled') merge(S.R, fxR.value, unit);
+    if(fxR.status==='fulfilled'){ merge(S.R, fxR.value, unit); S.rUnit = unit; }
     // 실제로 모인 봉 수만큼만 완료로 기록 → 부족하면 다음 폴링이 과거를 이어서 채운다
     const hardFail = [krR,exR,fxR].some(r=>r.status!=='fulfilled');
 
@@ -843,14 +923,15 @@
 
     // 실제로 모인 봉 수만큼만 완료로 기록 → 부족하면 다음 폴링이 과거를 이어서 채운다
     if(!hardFail){
-      const got = Math.min(S.K.size||0, S.G.size||0);
+      // 환율도 다 차야 완료 — 재사용하던 환율 캐시가 중간에 버려진 경우까지 채운다
+      const got = Math.min(S.K.size||0, S.G.size||0, S.mode==='cmp' ? Infinity : (S.R.size||0));
       // 실제로 "더 과거"에 닿았을 때만 계속 이어받는다. 더 못 가면 그 거래소 데이터의 시작점
       // 진전 여부는 두 계열을 각각 본다. 한쪽이 먼저 다 차면 min 값이 멈춰서
       // 아직 채우는 중인 다른 쪽의 진전이 가려지고, 수집이 조기에 끝나 버린다.
-      const oK = minKey(S.K) ?? Infinity, oG = minKey(S.G) ?? Infinity;
+      const oK = minKey(S.K) ?? Infinity, oG = minKey(S.G) ?? Infinity, oR = minKey(S.R) ?? Infinity;
       const prev = S.lastOldest || {};
-      const wentBack = oK < (prev.K ?? Infinity) || oG < (prev.G ?? Infinity);
-      S.lastOldest = {K:oK, G:oG};
+      const wentBack = oK < (prev.K ?? Infinity) || oG < (prev.G ?? Infinity) || oR < (prev.R ?? Infinity);
+      S.lastOldest = {K:oK, G:oG, R:oR};
       // 더 과거로 못 가면 그게 데이터의 시작점 → 완료로 간주하고 이후엔 꼬리만 갱신
       S.fullDone = wentBack ? Math.max(S.fullDone||0, Math.min(need, got)) : need;
       S.backfilling = ((got < need*0.98 && wentBack) || (gapLeft && repaired)) && (S.bfRounds||0) < 40;
@@ -1075,6 +1156,10 @@
   });
   cv.addEventListener('mouseleave',()=>{S.hover=null;tip.style.opacity=0;render()});
   window.addEventListener('resize',render);
+  // 배경에 있다 돌아오면 캔버스 내용이 비는 기기가 있다 → 다시 그린다
+  document.addEventListener('visibilitychange',()=>{ if(!document.hidden) render(); });
+  window.addEventListener('pageshow',()=>render());
+  window.addEventListener('focus',()=>render());
 
   // 휠 = 기간 조절
   cv.addEventListener('wheel', e=>{
@@ -1170,9 +1255,14 @@
     const v = $('sym').value.trim().toUpperCase();
     // 기본 티커를 비워 뒀으므로, 빈 채로 누르면 조용히 BTC를 조회하지 않고 알려 준다
     if(!v){ $('sym').focus(); say('warn','티커를 입력한 뒤 [조회]를 눌러 주세요. <span class="mute">예: SAND, ONG, KAIA</span>'); return; }
+    // 같은 종목·같은 설정이고 직전 결과가 고른 거래소에서 온 것이면, 받아 둔 봉은 그대로 두고
+    // 그 뒤로 빈 꼬리만 받는다. 모바일에서 [조회]가 몇 분씩 걸리던 가장 큰 이유가 매번 처음부터 받던 것.
+    const keep = v === S.sym && S.series.length && S.seriesKey === S.cacheKey && !S.krxWhy && !S.exWhy;
     S.sym=v; $('sym').value=S.sym;
-    // [조회]를 누를 때마다 사용자가 고른 거래소부터 다시 시도한다
-    S.started=true; S.winner=null; S.exPick=''; S.krxPick=''; S.exWhy=''; S.krxWhy=''; netReset();
+    S.started=true; S.exPick=''; S.krxPick=''; S.exWhy=''; S.krxWhy=''; netReset();
+    if(keep){ load(); schedule(); return; }
+    // 새 종목이거나 직전에 대체 거래소를 썼으면 → 고른 거래소부터 처음부터 다시
+    S.winner=null;
     S.krxUsed = S.krx==='auto' ? '' : S.krx;
     S.cacheKey=''; S.series=[]; S.seriesKey=''; load(); schedule(); }
   $('go').addEventListener('click',go);
@@ -1182,7 +1272,8 @@
   $('gpair').addEventListener('keydown',e=>{if(e.key==='Enter'){S.cacheKey='';reload()}});
   $('proxyCustom').addEventListener('keydown',e=>{if(e.key==='Enter'){S.route.clear();reload()}});
   applyLabels();
-  stat('조회 대기','');
+  // 탭이 폐기됐다 돌아온 경우: 직전 결과를 즉시 되살린다(자동 조회는 하지 않는다)
+  if(!loadSnap()) stat('조회 대기','');   // 되살려도 자동 조회·자동 갱신은 하지 않는다
   render();
 })();
 </script>
