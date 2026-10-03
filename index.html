@@ -249,7 +249,10 @@
      → 호스트마다 동시 실행 수와 최소 간격을 두고, 429를 맞으면 스스로 느려진다. */
   const LANES = {};
   const GAP0 = 200, MAX0 = 2;     // 기본: 호스트당 동시 2건, 최소 간격 0.2초(≈초당 5건)
-  const lane = h => LANES[h] || (LANES[h] = {active:0, q:[], next:0, gap:GAP0, max:MAX0, ok:0});
+  // 업비트는 모바일 공유 IP에서 가장 먼저 한도에 걸린다 → 처음부터 더 천천히(초당 약 3건)
+  const PROFILE = {'api.upbit.com':{gap:330, max:2}};
+  const lane = h => LANES[h] || (LANES[h] = {active:0, q:[], next:0, ok:0,
+                                gap:(PROFILE[h]||{}).gap||GAP0, max:(PROFILE[h]||{}).max||MAX0});
   async function slot(host){
     const L = lane(host);
     while(L.active >= L.max) await new Promise(r=>L.q.push(r));
@@ -271,8 +274,9 @@
   }
   function faster(host){              // 연속 성공하면 조금씩 되돌린다
     const L = lane(host);
-    if(L.gap <= GAP0 && L.max >= MAX0) return;
-    if(++L.ok >= 15){ L.ok = 0; L.gap = Math.max(GAP0, Math.round(L.gap*0.7)); L.max = Math.min(MAX0, L.max+1); }
+    const g0 = (PROFILE[host]||{}).gap||GAP0, m0 = (PROFILE[host]||{}).max||MAX0;
+    if(L.gap <= g0 && L.max >= m0) return;
+    if(++L.ok >= 15){ L.ok = 0; L.gap = Math.max(g0, Math.round(L.gap*0.7)); L.max = Math.min(m0, L.max+1); }
   }
   // 응답이 없는 요청이 전체를 붙잡지 않도록 반드시 시간 제한을 건다
   async function fetchT(u, ms){
@@ -292,11 +296,55 @@
      거래소가 레이트리밋으로 429를 돌려줄 때 CORS 헤더를 빼먹으면 우리는 429인지조차 모른다.
      → 이번 세션에 이미 한 번이라도 성공한 호스트에서 갑자기 연결 실패가 나면
        "차단"이 아니라 "혼잡"으로 보고, 느려져서 직접 다시 시도한다. 느린 우회로는 가지 않는다. */
-  const HOST = {};
-  const health = h => HOST[h] || (HOST[h] = {ok:0, fail:0});
+  /* 호스트 건강 기록 + 차단기(circuit breaker).
+     업비트 같은 거래소는 IP당 한도를 넘기면 429를 주고, 그래도 계속 두드리면 그 IP를 한동안
+     통째로 막는다(페널티). 모바일은 공인 IP를 여럿이 공유해 이 상태에 쉽게 빠지는데,
+     이때 "기다렸다 다시"를 반복하면 그 재시도 자체가 페널티를 연장한다(폰 실측: 재시도 73회 · 연결실패 93).
+     → 한 호스트에서 혼잡 신호가 연속 3번 나면 그 호스트를 잠시 '쉬게' 한다.
+       쉬는 동안엔 네트워크 요청 없이 즉시 실패시켜, 다른 원화거래소로 곧바로 넘어가게 한다.
+       쉬는 시간은 8초 → 16초 → 32초 → … 최대 120초로 늘고, 성공하면 줄어든다.
+       브라우저는 CORS 헤더 없는 429를 상태 코드 없는 "연결 실패"로만 보여 주므로,
+       이미 통하던 호스트의 연결 실패·시간 초과도 혼잡 신호로 친다. */
+  const HOST = {}, COOL_KEY = 'kimp.cool.v1';
+  const health = h => HOST[h] || (HOST[h] = {ok:0, fail:0, streak:0, trips:0, openUntil:0});
+  try{                                              // 탭이 폐기됐다 돌아와도 쉬는 중인 건 기억
+    const c = JSON.parse(localStorage.getItem(COOL_KEY)||'{}');
+    for(const [h,v] of Object.entries(c)) if(v.u > Date.now()) Object.assign(health(h), {openUntil:v.u, trips:v.t||1});
+  }catch(e){}
+  function saveCool(){
+    try{ const c={}; for(const [h,H] of Object.entries(HOST)) if(H.openUntil>Date.now()) c[h]={u:H.openUntil,t:H.trips};
+         localStorage.setItem(COOL_KEY, JSON.stringify(c)); }catch(e){}
+  }
+  const coolLeft = h => Math.max(0, Math.ceil((health(h).openUntil - Date.now())/1000));
+  function trip(h){
+    const H = health(h); H.trips++; H.streak = 0;
+    H.half = true;      // 쉬기가 끝난 뒤 첫 요청은 '시험'. 그게 실패하면 바로 다시 쉬게 한다(3번 두드리지 않음)
+    H.openUntil = Date.now() + Math.min(120000, 8000 * Math.pow(2, H.trips-1));
+    NET.code['쉬게 함'] = (NET.code['쉬게 함']||0) + 1;
+    saveCool();
+  }
+  const HOSTNAME = {'api.upbit.com':'업비트','api.bithumb.com':'빗썸','api.coinone.co.kr':'코인원'};
+  // 쉬는 중인 호스트 중 가장 늦게 풀리는 시점까지 남은 시간(ms). 없으면 0
+  // 지금 쉬는 중인 거래소 이름들
+  function coolNames(){
+    const nm = {'api.gateio.ws':'Gate.io','api.mexc.com':'MEXC','api.bitget.com':'Bitget','api.bybit.com':'Bybit',
+                'www.okx.com':'OKX','api.binance.com':'Binance','api.kucoin.com':'KuCoin'};
+    const out = Object.entries(HOST).filter(([,H])=>H.openUntil>Date.now()).map(([h])=>HOSTNAME[h]||nm[h]||h);
+    return out.join('·') || '거래소';
+  }
+  function coolWait(){
+    let w = 0; for(const H of Object.values(HOST)) w = Math.max(w, H.openUntil - Date.now());
+    return Math.max(0, w);
+  }
   async function J(url){
     const host = new URL(url).host, fixed = proxyChoice(), H = health(host);
     const known = H.ok > 0;                       // 이 세션에서 직접 호출이 통한 적 있음
+    if(H.half){ const L = lane(host); L.max = 1; }   // 시험 중엔 한 번에 하나씩만
+    // 쉬는 중인 호스트 → 요청을 보내지 않고 즉시 실패
+    if(!fixed && Date.now() < H.openUntil){
+      NET.code['쉬는 중 건너뜀'] = (NET.code['쉬는 중 건너뜀']||0) + 1;
+      throw Object.assign(new Error(`${HOSTNAME[host]||host} 요청 과다로 잠시 쉬는 중(${coolLeft(host)}초)`), {cool:true});
+    }
     let chain;
     if(fixed) chain = fixed;
     else if(known && H.fail < 8) chain = [''];    // 통하던 곳 → 우회하지 않고 직접만
@@ -304,9 +352,10 @@
     if(!fixed && chain.length > 1){ const w = routeGet(host); if(w!==undefined) chain=[w,...chain.filter(c=>c!==w)]; }
     let first=null, tried=0, hard=false;
     for(const p of chain){
-      // 직접 호출: 통하던 곳이면 넉넉히 기다리며 4회, 처음 보는 곳이면 2회 후 우회
-      const waits = p ? [] : (known ? [600, 1500, 3500] : [300]);
+      // 직접 호출 재시도는 딱 1회. 더 두드리면 페널티만 길어진다 — 나머지는 차단기와 거래소 대체가 맡는다
+      const waits = p ? [] : (known ? [900] : [300]);
       for(let a=0; a<=waits.length; a++){
+        if(!p && !fixed && Date.now() < H.openUntil){ hard = true; break; }   // 도중에 쉬게 됐으면 중단
         const t0 = performance.now();
         const tgt = p ? new URL(wrap(p,url)).host : host;
         await slot(tgt);
@@ -318,7 +367,7 @@
           const j = await r.json();
           if(performance.now()-t0 > 2000) NET.slow++;
           faster(tgt);
-          if(!p){ H.ok++; H.fail = 0; }
+          if(!p){ H.ok++; H.fail = 0; H.streak = 0; H.half = false; if(H.trips) H.trips--; }
           // 혼잡 때문에 우회로 넘어온 경우엔 그 경로를 기억하지 않는다
           if(!fixed && !(p && first && (first.status === 429 || first.soft)))
             S.route.set(host,{p, t:Date.now()});
@@ -329,18 +378,23 @@
           const tag = e.tag || (e.status ? 'HTTP '+e.status : '연결실패');
           NET.code[tag] = (NET.code[tag]||0) + 1;
           if(!p) H.fail++;
-          // 혼잡 신호: 429·503, 또는 통하던 곳의 상태 코드 없는 실패/시간 초과
-          const soft = e.status === 429 || e.status === 503 || (!p && known && !e.status);
-          if(soft){ e.soft = true; slower(tgt, e.wait||0); }
+          // 혼잡 신호: 429·418·503, 또는 통하던 곳의 상태 코드 없는 실패/시간 초과
+          const soft = [418,429,503].includes(e.status) || (!p && known && !e.status);
+          if(soft){
+            e.soft = true; slower(tgt, e.wait||0);
+            if(!p && (++H.streak >= 3 || H.half)) trip(host);
+          }
           if(!first) first = e;
           // 서버가 정상적으로 거부한 응답(파라미터 오류 등)은 다시 해도 같다 → 즉시 중단
-          if(e.status && ![403,429,451,503].includes(e.status)){ hard=true; break; }
+          if(e.status && ![403,418,429,451,503].includes(e.status)){ hard=true; break; }
           if(a < waits.length){ NET.retry++; await sleep(Math.max(waits[a], e.wait||0)); }
         }finally{ release(tgt); }
       }
       if(hard) break;
       tried++;
     }
+    if(!fixed && Date.now() < H.openUntil)
+      throw Object.assign(new Error(`${HOSTNAME[host]||host} 요청 과다로 잠시 쉬는 중(${coolLeft(host)}초)`), {cool:true});
     throw new Error((first?first.message:'fetch 실패') + (tried>1?` · 우회 ${tried-1}회도 실패`:''));
   }
   // 수집 상태 한 줄 — 느릴 때 원인이 우회인지, 재시도인지, 느린 응답인지 바로 보인다
@@ -467,6 +521,9 @@
           let failed = 0, why = '';
           for(const r of res){ if(Array.isArray(r)) push(r); else { failed++; why = why || r.message; } }
           if(failed) tag.v1note = `${failed}/${res.length}페이지 실패(${why})`;
+          // 도중에 이 거래소가 '쉬게' 됐다면 빈 구간이 크게 남는다. 부분 성공으로 넘기면 이후 라운드에서
+          // 출처가 바뀌며 데이터가 꼬인다 → 실패로 돌려 다음 거래소가 처음부터 통째로 받게 한다.
+          if(failed && S.krx==='auto' && res.some(r => r && r.cool)) throw Object.assign(new Error(why), {cool:true});
         }
       }
     }else if(out.length < n0){
@@ -513,20 +570,26 @@
   // 선택값(S.krx)과 화면의 선택 상자는 절대 바꾸지 않는다 — [조회]를 다시 누르면 고른 곳부터 시도한다.
   async function krwCandles(coin, unit, need, tag, map, full){
     tag = tag || {};
-    const first = S.krxPick || (S.krx==='auto' ? (S.krxUsed || KRX_ORDER[0]) : S.krx);
-    const list = [first, ...KRX_ORDER.filter(k=>k!==first)];
+    // 원화거래소를 직접 골랐으면 그 거래소만 쓴다(다른 원화거래소로 바꾸지 않음).
+    // 막히면 실패로 두고, 쉬기가 끝나면 같은 거래소로 다시 시도한다. 대체는 '자동탐색'일 때만.
+    const first = S.krx==='auto' ? (S.krxPick || S.krxUsed || KRX_ORDER[0]) : S.krx;
+    const list = S.krx==='auto' ? [first, ...KRX_ORDER.filter(k=>k!==first)] : [first];
+    const prev = S.krxUsed;
     let lastErr;
     for(const k of list){
       const t = {};
       try{
+        // 지금 캐시가 다른 거래소 것이면 그 위에 이어 붙이지 않는다 → 빈 맵으로 전체 수집
+        const own = !map || !prev || k === prev;
         const rows = map
           ? await twoPhase((n,before)=>krwCandlesOn(k, coin, unit, n, t, before),
-                           map, need, full, KRW_EX[k].kind !== 'coinone')
+                           own ? map : new Map(), need, full || !own, KRW_EX[k].kind !== 'coinone')
           : await krwCandlesOn(k, coin, unit, need, t);
         Object.assign(tag, t); S.krxUsed = k; S.krxPick = k;
         // 고른 거래소가 아닌 곳에서 받았으면 사유를 남겨 화면에 알린다
-        S.krxWhy = (S.krx !== 'auto' && k !== S.krx)
-          ? (lastErr ? lastErr.message : '조회 실패') : '';
+        if(S.krx === 'auto' || k === S.krx) S.krxWhy = '';
+        else if(lastErr) S.krxWhy = lastErr.message;          // 뒤 라운드에서 사유가 지워지지 않게
+        else if(!S.krxWhy) S.krxWhy = '조회 실패';
         return rows;
       }catch(e){ lastErr = e; tag[KRW_EX[k].name] = e.message; }
     }
@@ -535,13 +598,15 @@
   // USDT/KRW는 거래소마다 사실상 같은 값 → 코인이 잡힌 곳부터 시도하고, 막히면 다른 곳에서 받는다
   async function fxCandles(unit, need, tag, full){
     // 고정한 거래소가 있으면 환율도 거기부터 — 직전 조회에서 대체됐더라도 다시 시도한다
-    const first = S.krxPick || (S.krx!=='auto' ? S.krx : (S.krxUsed || KRX_ORDER[0]));
-    const order = [first, ...KRX_ORDER.filter(k=>k!==first)];
+    // 원화거래소를 고정했으면 환율도 그 거래소에서만(업비트 코인 × 빗썸 환율처럼 섞지 않는다)
+    const first = S.krx!=='auto' ? S.krx : (S.krxPick || S.krxUsed || KRX_ORDER[0]);
+    const order = S.krx!=='auto' ? [first] : [first, ...KRX_ORDER.filter(k=>k!==first)];
     let lastErr;
     for(const k of order){
       try{
+        const own = !S.fxUsed || k === S.fxUsed;
         const rows = await twoPhase((n,before)=>krwCandlesOn(k,'USDT',unit,n,tag,before),
-                                    S.R, need, full, KRW_EX[k].kind !== 'coinone');
+                                    own ? S.R : new Map(), need, full || !own, KRW_EX[k].kind !== 'coinone');
         S.fxUsed = k;
         return rows;
       }catch(e){ lastErr = e; }
@@ -552,9 +617,13 @@
   function swapTx(){
     if(S.mode==='cmp') return '';
     const out = [];
-    if(S.krx!=='auto' && S.krxUsed && S.krxUsed!==S.krx)
-      out.push(`원화는 <b>${KRW_EX[S.krx].name}</b>가 아니라 <b>${KRW_EX[S.krxUsed].name}</b> 데이터입니다.`
-             + (S.krxWhy?` <span class="mute">(${S.krxWhy})</span>`:''));
+    if(S.krx!=='auto' && S.krxUsed && S.krxUsed!==S.krx){
+      const h = {bithumb:'api.bithumb.com', upbit:'api.upbit.com', coinone:'api.coinone.co.kr'}[S.krx];
+      const left = h ? coolLeft(h) : 0, nm = KRW_EX[S.krx].name;
+      out.push(`원화는 <b>${nm}</b>가 아니라 <b>${KRW_EX[S.krxUsed].name}</b> 데이터입니다.`
+             + (left ? ` ${nm}가 요청 과다로 막혀 <b>${left}초</b> 동안 쉬게 했습니다 — 계속 두드리면 차단이 길어집니다.`
+                     : (S.krxWhy?` <span class="mute">(${S.krxWhy})</span>`:'')));
+    }
     if(S.ex!=='auto' && S.winner && S.winner!==S.ex)
       out.push(`해외는 <b>${EX[S.ex].name}</b>가 아니라 <b>${EX[S.winner].name}</b> 데이터입니다.`
              + (S.exWhy?` <span class="mute">(${S.exWhy})</span>`:''));
@@ -670,8 +739,9 @@
       : Math.max(4, Math.min(1000, Math.ceil((Date.now()-mk)/(S.unit*MINMS)) + 2));
     if(!full) return fetchFn(tail, null);
     if(!map.size || !canPage) return fetchFn(need, null);
-    // 이 쪽은 이미 요청 구간을 다 채웠다 → 반대쪽이 짧다고 해서 더 과거를 긁지 않는다
-    if(map.size >= need) return fetchFn(tail, null);
+    // 이 쪽은 이미 요청 구간을 다 채웠거나(봉 수) 구간 시작보다 과거까지 덮었다 → 더 과거를 긁지 않는다.
+    // 중간에 빈 곳은 구멍 메우기가 채운다
+    if(map.size >= need || minKey(map) <= Date.now() - need*S.unit*MINMS) return fetchFn(tail, null);
     const [t,bk] = await Promise.all([
       settle(fetchFn(tail, null)),
       settle(fetchFn(Math.max(2, need - map.size), minKey(map)))
@@ -687,8 +757,9 @@
     let best=null, bestKey=null, ok=0, lastErr;
     for(const k of list){
       try{
+        const own = !S.winner || k === S.winner;
         const rows = await twoPhase((n,before)=>exOne(k, sym, unit, n, before),
-                                    S.G, need, full, !EX[k].noPage);
+                                    own ? S.G : new Map(), need, full || !own, !EX[k].noPage);
         log.push([EX[k].name, true, rows.length+'봉'+(full?'':' · 갱신분')]);
         if(!best || rows.length > best.length){ best=rows; bestKey=k; }
         ok++;
@@ -697,8 +768,9 @@
     }
     if(!best) throw new Error(lastErr?lastErr.message:'해외 거래소 조회 실패');
     S.winner = bestKey; S.exName = EX[bestKey].name; S.exPick = bestKey;
-    S.exWhy = (S.ex !== 'auto' && bestKey !== S.ex)
-      ? (lastErr ? lastErr.message : '조회 실패') : '';
+    if(S.ex === 'auto' || bestKey === S.ex) S.exWhy = '';
+    else if(lastErr) S.exWhy = lastErr.message;
+    else if(!S.exWhy) S.exWhy = '조회 실패';
     return best;
   }
 
@@ -839,9 +911,10 @@
     if(key !== S.cacheKey){
       const keepR = S.mode!=='cmp' && S.R.size && S.rUnit===unit && S.krx!=='auto' && S.fxUsed===S.krx;
       S.cacheKey=key; S.K.clear(); S.G.clear(); if(!keepR) S.R.clear();
-      S.unit=unit; S.fullDone=0; S.backfilling=false; S.lastOldest=null; S.bfRounds=0;
+      S.unit=unit; S.fullDone=0; S.backfilling=false; S.finishing=false; S.lastOldest=null; S.bfRounds=0;
       S.repairTried=new Set(); netReset(); }
     const wasBackfilling = !!S.backfilling;
+    const wasFinishing = !!S.finishing; S.finishing = false;   // 이어받기 직후 '마무리 라운드'인지
     const need = Math.ceil(S.spanMin/unit) + 4;
     const full = need > (S.fullDone||0);             // 처음이거나 줌아웃 → 전체, 아니면 꼬리만
     const n = full ? Math.min(5000, need) : 4;
@@ -892,13 +965,14 @@
 
     // ── 구멍 메우기: 표시 구간 안에 빠진 범위가 있으면 그 범위만 콕 집어 다시 받는다
     // 과거 이어받기가 끝난 뒤에 실행한다(둘이 겹치면 요청이 불필요하게 몰린다)
-    let repaired = false, gapLeft = false;
-    if(!hardFail && !wasBackfilling){
+    let repaired = false, gapLeft = false, repairCool = false;
+    if(!hardFail && (!wasBackfilling || wasFinishing)){
       const newest = Math.max(maxKey(S.K)||0, maxKey(S.G)||0);
       const from = newest - S.spanMin*MINMS;
       S.repairTried = S.repairTried || new Set();
-      for(const side of ['K','G']){
-        const map = side==='K' ? S.K : S.G;
+      // 환율(USDT/KRW)도 같은 거래소에서 페이지 단위로 받으므로 구멍이 날 수 있다 → 함께 검사
+      for(const side of (S.mode==='cmp' ? ['K','G'] : ['K','G','R'])){
+        const map = side==='K' ? S.K : side==='G' ? S.G : S.R;
         for(let n=0; n<2; n++){                       // 한 회차에 큰 구멍 2개까지
           const gap = findGap(map, from, newest, unit);
           if(!gap) break;
@@ -911,12 +985,17 @@
             let rows;
             if(side==='G') rows = await exOne(S.mode==='cmp' ? S.cmpA : (S.winner||S.ex), S.sym, unit, cnt, gap.to);
             else if(S.mode==='cmp') rows = await exOne(S.cmpB, S.sym, unit, cnt, gap.to);
-            else rows = await krwCandlesOn(S.krxUsed || (S.krx==='auto'?'bithumb':S.krx), S.sym, unit, cnt, {}, gap.to);
+            else if(side==='R') rows = await krwCandlesOn(S.fxUsed || S.krxUsed || (S.krx==='auto'?KRX_ORDER[0]:S.krx), 'USDT', unit, cnt, {}, gap.to);
+            else rows = await krwCandlesOn(S.krxUsed || (S.krx==='auto'?KRX_ORDER[0]:S.krx), S.sym, unit, cnt, {}, gap.to);
             const before = map.size;
             if(rows?.length) merge(map, rows, unit);
             if(map.size > before) repaired = true;     // 실제로 채워졌을 때만 계속 시도
             else break;                                // 그 구간엔 데이터가 없다 → 중단
-          }catch(e){ break; }                         // 다음 회차에 다시 시도
+          }catch(e){
+            // 거래소가 쉬는 중이라 실패한 건 '시도함'으로 남기지 않는다 → 쉬기가 끝나면 다시
+            if(coolWait() > 0){ S.repairTried.delete(mark); repairCool = true; }
+            break;
+          }
         }
       }
     }
@@ -933,8 +1012,14 @@
       const wentBack = oK < (prev.K ?? Infinity) || oG < (prev.G ?? Infinity) || oR < (prev.R ?? Infinity);
       S.lastOldest = {K:oK, G:oG, R:oR};
       // 더 과거로 못 가면 그게 데이터의 시작점 → 완료로 간주하고 이후엔 꼬리만 갱신
-      S.fullDone = wentBack ? Math.max(S.fullDone||0, Math.min(need, got)) : need;
-      S.backfilling = ((got < need*0.98 && wentBack) || (gapLeft && repaired)) && (S.bfRounds||0) < 40;
+      const partial = coolWait() > 0 || /실패|중단/.test(tagTx(tagK)+' '+tagTx(tagR));
+      S.fullDone = wentBack ? Math.max(S.fullDone||0, Math.min(need, got))
+                            : (partial ? (S.fullDone||0) : need);
+      S.backfilling = ((got < need*0.98 && (wentBack || partial)) || (gapLeft && (repaired || repairCool)))
+                      && (S.bfRounds||0) < 40;
+      // (3) 이어받기가 방금 끝났으면 한 라운드 더 돌린다 — 이어받기 중엔 구멍 메우기를 건너뛰므로
+      //     이 마지막 라운드가 없으면 그 사이 생긴 구멍이 다음 [조회]까지 남는다
+      if(wasBackfilling && !S.backfilling && !wasFinishing){ S.finishing = true; S.backfilling = true; }
     }
     rebuild();
 
@@ -951,8 +1036,16 @@
           : [[krxName()+' '+S.sym,krR],['해외',exR],['USDT/KRW',fxR]]
         ).filter(([,r])=>r.status==='rejected');
       if(hard.length){
-        say('warn', `갱신 실패 — 직전 데이터를 유지합니다. <span class="mute">${hard.map(([n2,r])=>n2+': '+r.reason.message).join(' / ')}</span>`);
-        stat(`${pairTx} · ${spanTx(S.spanMin)} · ${unit}m · 갱신실패`,' warn');
+        const cw = coolWait();
+        if(cw > 0 && (S.coolRetry||0) < 6){
+          const sec = Math.ceil(cw/1000);
+          say('warn', `<b>${coolNames()}</b>가 요청 과다로 잠시 막혀 <b>${sec}초</b> 뒤 자동으로 다시 받습니다. `
+            + `화면은 직전 데이터입니다. <span class="mute">계속 두드리면 차단이 길어져서 그동안은 요청을 보내지 않습니다.</span>`);
+          stat(`${pairTx} · ${spanTx(S.spanMin)} · ${unit}m · ${sec}초 뒤 재시도`,' warn');
+        }else{
+          say('warn', `갱신 실패 — 직전 데이터를 유지합니다. <span class="mute">${hard.map(([n2,r])=>n2+': '+r.reason.message).join(' / ')}</span>`);
+          stat(`${pairTx} · ${spanTx(S.spanMin)} · ${unit}m · 갱신실패`,' warn');
+        }
       }else{
         const swap = swapTx();
         const cov = (S.series[S.series.length-1].t - S.series[0].t)/MINMS;
@@ -975,6 +1068,12 @@
              + (S.backfilling ? ` · 과거 수집 중…` : ` · ${hhmm(Date.now())}`),
              stale?' warn':(S.rf>0?' live':''));
       }
+    }else if(coolWait() > 0 && (S.coolRetry||0) < 6){
+      // 다른 거래소에도 없어 쉬는 중인 거래소를 기다려야 하는 경우 → 재촉하지 말고 쉬기가 끝나면 다시
+      const sec = Math.ceil(coolWait()/1000);
+      stat(`${sec}초 뒤 다시 시도`,' warn');
+      say('warn', `<b>${coolNames()}</b>가 요청 과다로 잠시 막혀 <b>${sec}초</b> 쉬었다가 자동으로 다시 시도합니다. `
+        + `<span class="mute">계속 두드리면 차단이 길어집니다.</span>`);
     }else if((S.retryN||0) < 3){
       // 아직 자동 재시도가 남아 있으면 실패로 단정하지 않는다
       stat('재시도 중…',' warn');
@@ -999,13 +1098,24 @@
     S.busy=false;
     if(S.pending){ S.pending=false; setTimeout(load, 0); return; }   // 예약된 요청 우선
     // 일시적 차단이면 간격을 늘려가며 세 번까지 자동 재시도
-    if(fresh && S.series.length) S.retryN = 0;
-    else if((S.retryN||0) < 3){
+    // 다음 라운드 예약은 한 곳에서 한 번만. 거래소가 쉬는 중이면 무엇이든 쉬기가 끝난 뒤로 미룬다
+    // (쉬는 동안 0.4초마다 이어받기를 돌리면 즉시 실패만 수천 번 쌓이고 해외 쪽만 불필요하게 두드린다)
+    const cw = coolWait();
+    const failed = [krR,exR,fxR].some(r=>r && r.status==='rejected');
+    if(cw > 0 && (failed || S.backfilling)){
+      if((S.coolRetry||0) < 6){ S.coolRetry = (S.coolRetry||0) + 1; setTimeout(load, cw + 700); }
+    }else if(fresh && S.series.length && !failed){
+      S.retryN = 0; S.coolRetry = 0;
+      // 과거 구간이 아직 덜 찼고 직전 라운드에서 진전이 있었으면 이어서 채운다
+      if(S.backfilling){ S.bfRounds=(S.bfRounds||0)+1; setTimeout(load, 400); }
+    }else if(fresh && S.series.length){
+      // 일부 실패(쉬는 중 아님) — 화면은 유지, 이어받기 중이었다면 계속
+      S.retryN = 0;
+      if(S.backfilling){ S.bfRounds=(S.bfRounds||0)+1; setTimeout(load, 1500); }
+    }else if((S.retryN||0) < 3){
       S.retryN=(S.retryN||0)+1;
       setTimeout(load, [1500,3000,5000][S.retryN-1]);
     }
-    // 과거 구간이 아직 덜 찼고 직전 라운드에서 진전이 있었으면 이어서 채운다 (상한 30회)
-    if(S.backfilling && S.series.length && fresh){ S.bfRounds=(S.bfRounds||0)+1; setTimeout(load, 400); }
   }
 
   /* ---------- chart ---------- */
@@ -1259,7 +1369,7 @@
     // 그 뒤로 빈 꼬리만 받는다. 모바일에서 [조회]가 몇 분씩 걸리던 가장 큰 이유가 매번 처음부터 받던 것.
     const keep = v === S.sym && S.series.length && S.seriesKey === S.cacheKey && !S.krxWhy && !S.exWhy;
     S.sym=v; $('sym').value=S.sym;
-    S.started=true; S.exPick=''; S.krxPick=''; S.exWhy=''; S.krxWhy=''; netReset();
+    S.started=true; S.exPick=''; S.krxPick=''; S.exWhy=''; S.krxWhy=''; S.coolRetry=0; netReset();
     if(keep){ load(); schedule(); return; }
     // 새 종목이거나 직전에 대체 거래소를 썼으면 → 고른 거래소부터 처음부터 다시
     S.winner=null;
