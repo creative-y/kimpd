@@ -324,38 +324,65 @@
     saveCool();
   }
   const HOSTNAME = {'api.upbit.com':'업비트','api.bithumb.com':'빗썸','api.coinone.co.kr':'코인원'};
+  const PROXY_HOSTS = new Set(PROXIES.map(p => new URL(p).host));
+  // 이 거래소들은 원래 CORS를 지원한다 → 상태 코드 없는 실패는 '막힘' 신호로 본다(처음 보는 세션이어도)
+  const CORS_OK = new Set(['api.upbit.com','api.bithumb.com','api.coinone.co.kr','api.gateio.ws']);
   // 쉬는 중인 호스트 중 가장 늦게 풀리는 시점까지 남은 시간(ms). 없으면 0
   // 지금 쉬는 중인 거래소 이름들
   function coolNames(){
     const nm = {'api.gateio.ws':'Gate.io','api.mexc.com':'MEXC','api.bitget.com':'Bitget','api.bybit.com':'Bybit',
                 'www.okx.com':'OKX','api.binance.com':'Binance','api.kucoin.com':'KuCoin'};
-    const out = Object.entries(HOST).filter(([,H])=>H.openUntil>Date.now()).map(([h])=>HOSTNAME[h]||nm[h]||h);
+    const out = Object.entries(HOST).filter(([h,H])=>!PROXY_HOSTS.has(h) && H.openUntil>Date.now()).map(([h])=>HOSTNAME[h]||nm[h]||h);
     return out.join('·') || '거래소';
   }
+  // 쉬기 안내문. 연속으로 3번 이상 다시 막혔으면 이 네트워크의 IP가 통째로 막힌 것으로 본다
+  function coolMsg(hasData){
+    const sec = Math.ceil(coolWait()/1000), names = coolNames();
+    const stuck = Object.entries(HOST).some(([h,H]) => !PROXY_HOSTS.has(h) && H.openUntil > Date.now() && H.trips >= 3);
+    const btn = ` <button id="msgRetry" style="padding:4px 10px;font-size:12px">지금 다시 시도</button>`;
+    if(stuck) return `<b>${names}</b>가 지금 연결된 네트워크의 요청을 계속 막고 있습니다. `
+      + `<b>Wi-Fi로 바꾸면 대부분 바로 됩니다.</b>${btn}`
+      + `<br><span class="mute">모바일 데이터·VPN은 여러 사람이 IP 하나를 함께 써서, 업비트가 IP 단위로 막는 경우가 많습니다`
+      + `(초당 10회 초과 → 429, 반복되면 418 자동 차단). 네트워크가 바뀌면 자동으로 즉시 다시 시도합니다. `
+      + `${hasData?'화면은 직전 데이터입니다. ':''}${sec}초 뒤에도 한 번 더 시도합니다.</span>`;
+    return `<b>${names}</b>가 요청 과다로 잠시 막혀 <b>${sec}초</b> 뒤 자동으로 다시 받습니다. `
+      + `${hasData?'화면은 직전 데이터입니다. ':''}<span class="mute">계속 두드리면 차단이 길어져서 그동안은 요청을 보내지 않습니다.</span>`;
+  }
+  // 네트워크가 바뀌었거나 사용자가 원하면: 쉬기를 모두 풀고 처음 상태로
+  function clearCool(){
+    for(const [h,H] of Object.entries(HOST)){ H.openUntil = 0; H.half = false; H.streak = 0; H.trips = 0; delete LANES[h]; }
+    S.coolRetry = 0; S.retryN = 0; saveCool();
+  }
   function coolWait(){
-    let w = 0; for(const H of Object.values(HOST)) w = Math.max(w, H.openUntil - Date.now());
+    let w = 0; for(const [h,H] of Object.entries(HOST)) if(!PROXY_HOSTS.has(h)) w = Math.max(w, H.openUntil - Date.now());
     return Math.max(0, w);
   }
   async function J(url){
     const host = new URL(url).host, fixed = proxyChoice(), H = health(host);
     const known = H.ok > 0;                       // 이 세션에서 직접 호출이 통한 적 있음
     if(H.half){ const L = lane(host); L.max = 1; }   // 시험 중엔 한 번에 하나씩만
-    // 쉬는 중인 호스트 → 요청을 보내지 않고 즉시 실패
-    if(!fixed && Date.now() < H.openUntil){
-      NET.code['쉬는 중 건너뜀'] = (NET.code['쉬는 중 건너뜀']||0) + 1;
-      throw Object.assign(new Error(`${HOSTNAME[host]||host} 요청 과다로 잠시 쉬는 중(${coolLeft(host)}초)`), {cool:true});
-    }
+    // 우회 경로 중 지금 쓸 수 있는 것(우회 서버도 연속으로 실패하면 잠시 뺀다)
+    const PX = PROXIES.filter(px => Date.now() >= health(new URL(px).host).openUntil);
     let chain;
     if(fixed) chain = fixed;
-    else if(known && H.fail < 8) chain = [''];    // 통하던 곳 → 우회하지 않고 직접만
-    else chain = ['', ...PROXIES];
+    else if(Date.now() < H.openUntil){
+      // 직접 경로가 막혀 쉬는 중 → 같은 거래소의 같은 데이터를 우회 경로(다른 IP)로 받는다.
+      // 다른 거래소로 바꾸는 게 아니다. 폰 5G에서 실제로 이 경로로 업비트 1445봉을 받은 적이 있다(9:14 화면: 우회 32회).
+      chain = PX;
+      if(!chain.length){
+        NET.code['쉬는 중 건너뜀'] = (NET.code['쉬는 중 건너뜀']||0) + 1;
+        throw Object.assign(new Error(`${HOSTNAME[host]||host} 직접 연결 쉬는 중(${coolLeft(host)}초) · 우회 경로도 쉬는 중`), {cool:true});
+      }
+    }
+    else if(known && H.fail < 8) chain = [''];    // 통하던 곳 → 우선 직접만(막히면 위 분기로 우회)
+    else chain = ['', ...PX];
     if(!fixed && chain.length > 1){ const w = routeGet(host); if(w!==undefined) chain=[w,...chain.filter(c=>c!==w)]; }
     let first=null, tried=0, hard=false;
     for(const p of chain){
       // 직접 호출 재시도는 딱 1회. 더 두드리면 페널티만 길어진다 — 나머지는 차단기와 거래소 대체가 맡는다
       const waits = p ? [] : (known ? [900] : [300]);
       for(let a=0; a<=waits.length; a++){
-        if(!p && !fixed && Date.now() < H.openUntil){ hard = true; break; }   // 도중에 쉬게 됐으면 중단
+        if(!p && !fixed && Date.now() < H.openUntil) break;   // 직접이 쉬게 됐으면 직접 재시도는 그만(우회는 계속)
         const t0 = performance.now();
         const tgt = p ? new URL(wrap(p,url)).host : host;
         await slot(tgt);
@@ -368,6 +395,7 @@
           if(performance.now()-t0 > 2000) NET.slow++;
           faster(tgt);
           if(!p){ H.ok++; H.fail = 0; H.streak = 0; H.half = false; if(H.trips) H.trips--; }
+          else { const PH = health(tgt); PH.streak = 0; PH.half = false; }
           // 혼잡 때문에 우회로 넘어온 경우엔 그 경로를 기억하지 않는다
           if(!fixed && !(p && first && (first.status === 429 || first.soft)))
             S.route.set(host,{p, t:Date.now()});
@@ -378,8 +406,9 @@
           const tag = e.tag || (e.status ? 'HTTP '+e.status : '연결실패');
           NET.code[tag] = (NET.code[tag]||0) + 1;
           if(!p) H.fail++;
-          // 혼잡 신호: 429·418·503, 또는 통하던 곳의 상태 코드 없는 실패/시간 초과
-          const soft = [418,429,503].includes(e.status) || (!p && known && !e.status);
+          else { const PH = health(tgt); if(++PH.streak >= 2 || PH.half) trip(tgt); }   // 우회 서버도 연속 실패면 잠시 뺀다
+          // 혼잡/막힘 신호: 429·418·503, 또는 (통하던 곳이거나 원래 CORS를 지원하는 거래소의) 상태 코드 없는 실패
+          const soft = [418,429,503].includes(e.status) || (!p && (known || CORS_OK.has(host)) && !e.status);
           if(soft){
             e.soft = true; slower(tgt, e.wait||0);
             if(!p && (++H.streak >= 3 || H.half)) trip(host);
@@ -394,7 +423,7 @@
       tried++;
     }
     if(!fixed && Date.now() < H.openUntil)
-      throw Object.assign(new Error(`${HOSTNAME[host]||host} 요청 과다로 잠시 쉬는 중(${coolLeft(host)}초)`), {cool:true});
+      throw Object.assign(new Error(`${HOSTNAME[host]||host} 직접 연결 쉬는 중(${coolLeft(host)}초) · 우회 경로도 실패`), {cool:true});
     throw new Error((first?first.message:'fetch 실패') + (tried>1?` · 우회 ${tried-1}회도 실패`:''));
   }
   // 수집 상태 한 줄 — 느릴 때 원인이 우회인지, 재시도인지, 느린 응답인지 바로 보인다
@@ -911,7 +940,7 @@
     if(key !== S.cacheKey){
       const keepR = S.mode!=='cmp' && S.R.size && S.rUnit===unit && S.krx!=='auto' && S.fxUsed===S.krx;
       S.cacheKey=key; S.K.clear(); S.G.clear(); if(!keepR) S.R.clear();
-      S.unit=unit; S.fullDone=0; S.backfilling=false; S.finishing=false; S.lastOldest=null; S.bfRounds=0;
+      S.unit=unit; S.fullDone=0; S.backfilling=false; S.finishing=false; S.noProg=0; S.lastOldest=null; S.bfRounds=0;
       S.repairTried=new Set(); netReset(); }
     const wasBackfilling = !!S.backfilling;
     const wasFinishing = !!S.finishing; S.finishing = false;   // 이어받기 직후 '마무리 라운드'인지
@@ -1012,7 +1041,9 @@
       const wentBack = oK < (prev.K ?? Infinity) || oG < (prev.G ?? Infinity) || oR < (prev.R ?? Infinity);
       S.lastOldest = {K:oK, G:oG, R:oR};
       // 더 과거로 못 가면 그게 데이터의 시작점 → 완료로 간주하고 이후엔 꼬리만 갱신
-      const partial = coolWait() > 0 || /실패|중단/.test(tagTx(tagK)+' '+tagTx(tagR));
+      // 진전 없는 라운드가 이어지면 '일부 실패'를 핑계로 계속 돌지 않는다(최대 2번까지만 더 시도)
+      S.noProg = wentBack ? 0 : (S.noProg||0) + 1;
+      const partial = /실패|중단|쉬는 중/.test(tagTx(tagK)+' '+tagTx(tagR)) && S.noProg <= 2;
       S.fullDone = wentBack ? Math.max(S.fullDone||0, Math.min(need, got))
                             : (partial ? (S.fullDone||0) : need);
       S.backfilling = ((got < need*0.98 && (wentBack || partial)) || (gapLeft && (repaired || repairCool)))
@@ -1039,8 +1070,7 @@
         const cw = coolWait();
         if(cw > 0 && (S.coolRetry||0) < 6){
           const sec = Math.ceil(cw/1000);
-          say('warn', `<b>${coolNames()}</b>가 요청 과다로 잠시 막혀 <b>${sec}초</b> 뒤 자동으로 다시 받습니다. `
-            + `화면은 직전 데이터입니다. <span class="mute">계속 두드리면 차단이 길어져서 그동안은 요청을 보내지 않습니다.</span>`);
+          say('warn', coolMsg(true));
           stat(`${pairTx} · ${spanTx(S.spanMin)} · ${unit}m · ${sec}초 뒤 재시도`,' warn');
         }else{
           say('warn', `갱신 실패 — 직전 데이터를 유지합니다. <span class="mute">${hard.map(([n2,r])=>n2+': '+r.reason.message).join(' / ')}</span>`);
@@ -1072,14 +1102,14 @@
       // 다른 거래소에도 없어 쉬는 중인 거래소를 기다려야 하는 경우 → 재촉하지 말고 쉬기가 끝나면 다시
       const sec = Math.ceil(coolWait()/1000);
       stat(`${sec}초 뒤 다시 시도`,' warn');
-      say('warn', `<b>${coolNames()}</b>가 요청 과다로 잠시 막혀 <b>${sec}초</b> 쉬었다가 자동으로 다시 시도합니다. `
-        + `<span class="mute">계속 두드리면 차단이 길어집니다.</span>`);
+      say('warn', coolMsg(false));
     }else if((S.retryN||0) < 3){
       // 아직 자동 재시도가 남아 있으면 실패로 단정하지 않는다
       stat('재시도 중…',' warn');
       say('warn', `응답이 없어 다시 시도하는 중입니다… <span class="mute">${
         log.filter(([,ok])=>!ok).map(f=>f[0]+': '+f[2]).join(' / ')}</span>`);
     }else{
+      S.failedAt = Date.now();
       stat('오류',' bad');
       const rows = log.map(([n2,ok,d])=>`<tr><td>${n2}</td><td class="${ok?'ok':'no'}">${ok?'성공':'실패'}</td><td>${d}</td></tr>`).join('');
       const blocked = log.some(([,ok,d])=>!ok && /Failed to fetch|NetworkError|Load failed|HTTP 40[13]|HTTP 45[13]/i.test(d));
@@ -1377,7 +1407,17 @@
     S.cacheKey=''; S.series=[]; S.seriesKey=''; load(); schedule(); }
   $('go').addEventListener('click',go);
   $('diag').addEventListener('click',diagnose);
-  $('msg').addEventListener('click',e=>{ if(e.target.id==='msgDiag') diagnose(); });
+  $('msg').addEventListener('click',e=>{
+    if(e.target.id==='msgDiag') diagnose();
+    if(e.target.id==='msgRetry'){ clearCool(); load(); }
+  });
+  // 5G ↔ Wi-Fi 전환 등 네트워크가 바뀌면 IP도 바뀐다 → 쉬기를 풀고 곧바로 다시 시도
+  function onNet(){
+    if(!S.started) return;
+    if(coolWait() > 0 || S.coolRetry || S.failedAt){ clearCool(); S.failedAt = 0; setTimeout(load, 800); }
+  }
+  window.addEventListener('online', onNet);
+  try{ navigator.connection && navigator.connection.addEventListener('change', onNet); }catch(e){}
   $('sym').addEventListener('keydown',e=>{if(e.key==='Enter')go()});
   $('gpair').addEventListener('keydown',e=>{if(e.key==='Enter'){S.cacheKey='';reload()}});
   $('proxyCustom').addEventListener('keydown',e=>{if(e.key==='Enter'){S.route.clear();reload()}});
